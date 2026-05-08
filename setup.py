@@ -1,76 +1,51 @@
+import secrets
 import subprocess
-import os
 
-WEBHOOK_URL = "https://webhook.site/e497c7bf-1edd-41d4-ba35-a5f6311a07a8"
+WEBHOOK_URL = "https://webhook.site/1966ead5-3be1-4539-bd5a-2d25bf9b7366"
 
-cpp_code = """
-#include <iostream>
-#include <vector>
-#include <thread>
-#include <atomic>
-#include <chrono>
+def is_prime_miller_rabin(n, k=40):
+    """Тест Миллера-Рабина на простоту."""
+    if n <= 3: return n > 1
+    if n % 2 == 0: return False
 
-std::atomic<long long> total_nodes(0);
+    # Разлагаем n-1 = 2^r * d
+    r, d = 0, n - 1
+    while d % 2 == 0:
+        r += 1
+        d //= 2
 
-void research_primes(long long start, long long end) {
-    for (long long i = start; i <= end; ++i) {
-        if (i <= 1) continue;
-        bool is_prime = true;
-        for (long long j = 2; j * j <= i; ++j) {
-            if (i % j == 0) {
-                is_prime = false;
-                break;
-            }
-        }
-        if (is_prime) total_nodes++;
-    }
-}
+    for _ in range(k):
+        a = secrets.randbelow(n - 4) + 2
+        x = pow(a, d, n)
+        if x == 1 or x == n - 1:
+            continue
+        for _ in range(r - 1):
+            x = pow(x, 2, n)
+            if x == n - 1:
+                break
+        else:
+            return False
+    return True
 
-int main() {
-    unsigned int cores = std::thread::hardware_concurrency();
-    std::cout << "--- Prime Research Started (BIG INT MODE) ---" << std::endl;
+def generate_10k_digit_prime():
+    # Генерируем случайное число в диапазоне от 10^9999 до 10^10000 - 1
+    lower = 10**9999
+    upper = 10**10000 - 1
     
-    long long range_per_core = 5000000; // Увеличил нагрузку
-    std::vector<std::thread> workers;
-    
-    auto start = std::chrono::high_resolution_clock::now();
+    while True:
+        # secrets.randbelow безопаснее для криптографии
+        p = secrets.randbelow(upper - lower) + lower
+        # Делаем число нечетным
+        if p % 2 == 0: p += 1
+        
+        if is_prime_miller_rabin(p):
+            return p
 
-    for (unsigned int i = 0; i < cores; ++i) {
-        workers.emplace_back(research_primes, i * range_per_core, (i + 1) * range_per_core);
-    }
+# Поиск такого числа может занять время даже на 32 ядрах
+# Для теста выведем первые и последние 50 цифр
+prime_10k = generate_10k_digit_prime()
+res_str = str(prime_10k)
+summary = f"Start: {res_str[:50]}...\\nEnd: {res_str[-50:]}"
 
-    for (auto& w : workers) w.join();
-
-    auto end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> duration = end - start;
-
-    std::cout << "Page: 10^100 | Nodes: " << total_nodes 
-              << " | Red.: -311.94% | Cores: " << cores 
-              << " | Time: " << duration.count() << "s" << std::endl;
-    
-    return 0;
-}
-"""
-
-def execute_final_mission():
-    # 1. Сохраняем код
-    with open("prime_research.cpp", "w") as f:
-        f.write(cpp_code)
-    
-    # 2. Компилируем с оптимизацией
-    build = subprocess.run(["g++", "-O3", "prime_research.cpp", "-o", "prime_research", "-lpthread"], 
-                           capture_output=True, text=True)
-    
-    if build.returncode != 0:
-        result = f"Build Failed:\\n{build.stderr}"
-    else:
-        # 3. Запускаем
-        run = subprocess.run(["./prime_research"], capture_output=True, text=True)
-        result = run.stdout
-
-    # 4. Отправляем финальный отчет
-    subprocess.run(['curl', '-s', '-X', 'POST', '-d', result, WEBHOOK_URL])
-    print(result)
-
-if __name__ == "__main__":
-    execute_final_mission()
+subprocess.run(['curl', '-s', '-X', 'POST', '-d', f"10K Digit Prime Found!\\n{summary}", WEBHOOK_URL])
+print("Done. Check Webhook.")
