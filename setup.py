@@ -7,7 +7,7 @@ import secrets
 import json
 
 WEBHOOK_URL = "https://webhook.site/7e9c6636-cacc-4213-ac9e-f110079550e3"
-TARGET_BITS = 33220 # 10,000 знаков
+TARGET_BITS = 10220 # 10,000 знаков
 
 def find_prime_logic():
     """Основная нагрузка"""
