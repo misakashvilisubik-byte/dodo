@@ -7,7 +7,7 @@ import time
 import signal
 
 WEBHOOK_URL = "https://webhook.site/7e9c6636-cacc-4213-ac9e-f110079550e3"
-TARGET_BITS = 166089  # Ровно 50,000 десятичных знаков
+TARGET_BITS = 33220  # Ровно 10,000 десятичных знаков
 
 def send_data(payload):
     try:
@@ -70,6 +70,6 @@ if __name__ == "__main__":
     try:
         while True:
             print(f"[!] Current Load: {os.getloadavg()}")
-            time.sleep(180)
+            time.sleep(60)
     except:
         pass
