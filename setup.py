@@ -23,8 +23,8 @@ def is_prime_miller_rabin(n, k=40):
     return True
 
 def search_worker(found_event, result_queue):
-    lower = 10**9999
-    upper = 10**10000 - 1
+    lower = 10**4999
+    upper = 10**5000 - 1
     while not found_event.is_set():
         p = secrets.randbelow(upper - lower) + lower
         if p % 2 == 0: p += 1
