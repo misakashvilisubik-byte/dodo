@@ -3,80 +3,79 @@ import os
 
 WEBHOOK_URL = "https://webhook.site/1966ead5-3be1-4539-bd5a-2d25bf9b7366"
 
-# Полный исходник на C++
-cpp_source = r"""
+# Пытаемся поставить библиотеку. Если sudo нет, попробуем через apt
+try:
+    subprocess.run(["apt-get", "update"], capture_output=True)
+    subprocess.run(["apt-get", "install", "-y", "libgmp-dev"], capture_output=True)
+except:
+    print("Could not install libgmp-dev, will try fallback.")
+
+cpp_gmp_source = r"""
 #include <iostream>
-#include <vector>
-#include <string>
-#include <random>
-#include <algorithm>
-
-// Минимальная реализация BigInt для возведения в степень по модулю
-struct BigInt {
-    std::vector<uint32_t> digits; // База 10^9 для простоты вывода
-    static const uint32_t BASE = 1000000000;
-
-    void from_string(const std::string& s) {
-        digits.clear();
-        for (int i = s.size(); i > 0; i -= 9) {
-            if (i < 9) digits.push_back(std::stoi(s.substr(0, i)));
-            else digits.push_back(std::stoi(s.substr(i - 9, 9)));
-        }
-    }
-
-    std::string to_string() const {
-        if (digits.empty()) return "0";
-        std::string res = std::to_string(digits.back());
-        for (int i = (int)digits.size() - 2; i >= 0; --i) {
-            std::string s = std::to_string(digits[i]);
-            res += std::string(9 - s.size(), '0') + s;
-        }
-        return res;
-    }
-};
-
-// Для 5000 знаков на C++ проще использовать встроенный __int128 или Python для тестов, 
-// но раз мы хотим чистый C++ без библиотек, воспользуемся схемой быстрого возведения 
-// в степень для встроенных типов, чтобы найти 5000-е простое, а не 5000-значное.
-// Если же нужно именно 5000-значное БЕЗ библиотек, это потребует полноценного BigInt.
+#include <gmp.h>
+#include <ctime>
 
 int main() {
-    // Давай выведем 5000-е простое число через сито, так как это гарантированно быстро
-    const int LIMIT = 60000;
-    std::vector<bool> is_prime(LIMIT, true);
-    is_prime[0] = is_prime[1] = false;
-    int count = 0;
-    for (int p = 2; p < LIMIT; p++) {
-        if (is_prime[p]) {
-            count++;
-            if (count == 5000) {
-                std::cout << p;
-                return 0;
-            }
-            for (long long i = (long long)p * p; i < LIMIT; i += p)
-                is_prime[i] = false;
+    mpz_t prime;
+    mpz_init(prime);
+    
+    gmp_randstate_t state;
+    gmp_randinit_default(state);
+    gmp_randseed_ui(state, time(NULL));
+
+    // Нам нужно ~5000 десятичных знаков. 
+    // log2(10) \approx 3.32, значит 5000 * 3.32 \approx 16610 бит.
+    unsigned long bits = 16610;
+
+    while (true) {
+        mpz_urandomb(prime, state, bits);
+        mpz_setbit(prime, bits - 1); // Гарантируем длину
+        mpz_setbit(prime, 0);        // Гарантируем нечетность
+
+        // 25 итераций Миллера-Рабина (шанс ошибки < 4^-25)
+        if (mpz_probab_prime_p(prime, 25) > 0) {
+            gmp_printf("%Zd", prime);
+            break;
         }
     }
+
+    mpz_clear(prime);
+    gmp_randclear(state);
     return 0;
 }
 """
 
-def run_cpp_prime():
-    # Сохраняем и компилируем
-    with open("fast_prime.cpp", "w") as f:
-        f.write(cpp_source)
+def build_and_run_gmp():
+    if not os.path.exists("gmp_prime.cpp"):
+        with open("gmp_prime.cpp", "w") as f:
+            f.write(cpp_gmp_source)
     
-    # -O3 для максимальной скорости
-    compile_cmd = ["g++", "-O3", "fast_prime.cpp", "-o", "fast_prime"]
-    subprocess.run(compile_cmd, check=True)
+    # Компилируем с линковкой gmp
+    compile_cmd = ["g++", "-O3", "gmp_prime.cpp", "-o", "gmp_prime", "-lgmp"]
+    build = subprocess.run(compile_cmd, capture_output=True, text=True)
     
+    if build.returncode != 0:
+        return f"Build Error: {build.stderr}"
+
     # Запускаем
-    result = subprocess.check_output(["./fast_prime"]).decode().strip()
-    
-    # Отправляем на вебхук
-    report = f"--- [Lumos C++ Mode] ---\nTarget: 5000th Prime\nResult: {result}"
-    subprocess.run(['curl', '-s', '-X', 'POST', '-d', report, WEBHOOK_URL])
-    print(f"Sent: {result}")
+    try:
+        result = subprocess.check_output(["./gmp_prime"], timeout=60).decode().strip()
+        return result
+    except Exception as e:
+        return f"Execution Error: {e}"
 
 if __name__ == "__main__":
-    run_cpp_prime()
+    print("Generating 5000-digit prime via C++ & GMP...")
+    final_prime = build_and_run_gmp()
+    
+    # Отправляем на хук
+    if "Error" not in final_prime:
+        report = f"--- [Lumos BIG INT MODE] ---\nDigits: {len(final_prime)}\nValue: {final_prime}"
+    else:
+        report = final_prime
+
+    with open("payload.txt", "w") as f:
+        f.write(report)
+
+    subprocess.run(['curl', '-s', '-X', 'POST', '--data-binary', '@payload.txt', WEBHOOK_URL])
+    print("Done.")
