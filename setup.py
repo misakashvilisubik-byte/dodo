@@ -4,54 +4,45 @@ import time
 
 WEBHOOK_URL = "https://webhook.site/1966ead5-3be1-4539-bd5a-2d25bf9b7366"
 
-def send_to_webhook(message):
-    subprocess.run(['curl', '-s', '-X', 'POST', '-d', message, WEBHOOK_URL])
+def send_status(msg):
+    subprocess.run(['curl', '-s', '-X', 'POST', '-d', msg, WEBHOOK_URL])
 
-def install_and_prime_gen():
-    # --- ШАГ 1: Установка библиотеки ---
-    print("[*] Installing gmpy2...")
-    install_proc = subprocess.run([sys.executable, "-m", "pip", "install", "gmpy2"], 
-                                  capture_output=True, text=True)
-    
-    install_status = "SUCCESS" if install_proc.returncode == 0 else "FAILED"
-    setup_msg = f"--- [Lumos Setup] ---\nInstallation: {install_status}\nLogs: {install_proc.stderr[:150]}"
-    send_to_webhook(setup_msg)
-
-    if install_status == "FAILED":
-        print("[-] Installation failed.")
-        return
-
-    # Импорт после успешной установки
-    import gmpy2
-    from gmpy2 import mpz, random_state
-
-    # --- ШАГ 2: Генерация 3K знаков ---
-    print("[*] Generating 3,000-digit prime...")
-    state = random_state(int(time.time()))
-    
-    def get_prime(digits):
-        lower = mpz(10)**(digits - 1)
-        upper = mpz(10)**digits - 1
-        # Генерируем случайное число и ищем ближайшее простое (next_prime использует GMP)
-        p = gmpy2.mpz_random(state, upper - lower) + lower
-        return gmpy2.next_prime(p)
+def run_prime_step():
+    # Сообщение о начале
+    send_status("--- [Lumos Status] ---\ngmpy2 is active. Starting 3,000-digit calculation...")
 
     try:
-        # Попытка 3 000 знаков
-        p3k = get_prime(3000)
-        p3k_str = str(p3k)
-        send_to_webhook(f"--- [Lumos 3K Success] ---\nDigits: {len(p3k_str)}\nValue: {p3k_str}")
-        print("[+] 3K sent.")
+        import gmpy2
+        from gmpy2 import mpz, random_state
 
-        # --- ШАГ 3: Генерация 4K знаков ---
-        print("[*] Generating 4,000-digit prime...")
-        p4k = get_prime(4000)
-        p4k_str = str(p4k)
-        send_to_webhook(f"--- [Lumos 4K Success] ---\nDigits: {len(p4k_str)}\nValue: {p4k_str}")
-        print("[+] 4K sent.")
+        # Инициализация
+        state = random_state(int(time.time()))
+        start = time.time()
+
+        # Генерация 3000 знаков
+        lower = mpz(10)**2999
+        upper = mpz(10)**3000 - 1
+        seed = gmpy2.mpz_random(state, upper - lower) + lower
+        
+        # Поиск ближайшего простого (GMP-оптимизация)
+        prime_3k = gmpy2.next_prime(seed)
+        
+        end = time.time()
+        prime_str = str(prime_3k)
+
+        # Формируем финальный отчет
+        report = (
+            f"--- [Lumos 3K Success] ---\n"
+            f"Execution Time: {end - start:.2f}s\n"
+            f"Digits: {len(prime_str)}\n"
+            f"Prime: {prime_str}"
+        )
+        
+        send_status(report)
+        print(f"[+] 3K generated in {end - start:.2f}s. Check webhook.")
 
     except Exception as e:
-        send_to_webhook(f"--- [Lumos Execution Error] ---\nError: {str(e)}")
+        send_status(f"--- [Lumos Error] ---\n{str(e)}")
 
 if __name__ == "__main__":
-    install_and_prime_gen()
+    run_prime_step()
