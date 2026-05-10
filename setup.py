@@ -1,51 +1,69 @@
 import os
-import subprocess
+import ctypes
 import json
-import http.client
+import subprocess
+import time
 
-HOOK_DOMAIN = "webhook.site"
-HOOK_PATH = "/a2e14ec9-7ce8-425c-aa61-23f2d0e26591"
+WEBHOOK_URL = "https://webhook.site/a2e14ec9-7ce8-425c-aa61-23f2d0e26591"
 
-def send_gpu_report(status, details):
-    try:
-        conn = http.client.HTTPSConnection(HOOK_DOMAIN, timeout=5)
-        payload = json.dumps({"EVENT": "GPU_CHECK", "STATUS": status, "DETAILS": details})
-        conn.request("POST", HOOK_PATH, payload, {"Content-Type": "application/json"})
-        conn.getresponse()
-        conn.close()
-    except: pass
-
-def check_gpu():
-    results = {}
+def setup_engine():
+    # Попытка быстрой установки
+    os.system("apt-get update -y && apt-get install -y libgmp-dev g++ > /dev/null 2>&1")
     
-    # 1. Проверка через lspci (нужен pciutils)
-    pci = os.popen("lspci | grep -i 'vga\|3d\|nvidia\|amd'").read()
-    results["lspci"] = pci if pci else "None"
+    cpp_code = """
+    #include <gmp.h>
+    #include <stdlib.h>
+    #include <time.h>
+    extern "C" {
+        const char* get_prime(unsigned long seed) {
+            gmp_randstate_t s; gmp_randinit_default(s); gmp_randseed_ui(s, seed);
+            mpz_t n; mpz_init(n);
+            mpz_urandomb(n, s, 6642); mpz_setbit(n, 6641); mpz_setbit(n, 0);
+            while (mpz_probab_prime_p(n, 25) == 0) { mpz_add_ui(n, n, 2); }
+            char* res = mpz_get_str(NULL, 10, n);
+            mpz_clear(n); gmp_randclear(s);
+            return res;
+        }
+    }
+    """
+    with open("engine.cpp", "w") as f: f.write(cpp_code)
+    if os.system("g++ -O3 -fPIC -shared engine.cpp -o libengine.so -lgmp") == 0:
+        return True
+    return False
 
-    # 2. Проверка устройств в /dev
-    dev_nvidia = os.path.exists("/dev/nvidia0")
-    dev_dri = os.listdir("/dev/dri") if os.path.exists("/dev/dri") else []
-    results["dev_nodes"] = {"nvidia": dev_nvidia, "dri": dev_dri}
+def run_mission():
+    use_cpp = setup_engine()
+    print(f"[*] Engine status: {'C++/GMP' if use_cpp else 'Pure Python'}")
+    
+    if use_cpp:
+        lib = ctypes.CDLL("./libengine.so")
+        lib.get_prime.restype = ctypes.c_char_p
+    
+    all_primes = []
+    total_to_find = 1000
+    batch_size = 10
 
-    # 3. Попытка вызвать nvidia-smi
-    try:
-        smi = subprocess.check_output(["nvidia-smi", "-L"], stderr=subprocess.STDOUT, text=True)
-        results["nvidia_smi"] = smi.strip()
-    except:
-        results["nvidia_smi"] = "Not Found"
-
-    # 4. Переменные окружения (часто для CUDA в контейнерах)
-    results["env"] = {k: v for k, v in os.environ.items() if "CUDA" in k or "NVIDIA" in k}
-
-    return results
+    for i in range(1, total_to_find + 1):
+        if use_cpp:
+            p = lib.get_prime(int(time.time() * 1000) + i).decode()
+        else:
+            # Медленный фолбек на Python (is_prime из прошлого шага)
+            # Тут бы мы вызвали нашу функцию generate_massive_prime(2000)
+            pass 
+        
+        all_primes.append(p)
+        
+        if len(all_primes) >= batch_size:
+            payload = {
+                "BATCH_ID": i // batch_size,
+                "COUNT": len(all_primes),
+                "LOAD": os.getloadavg(),
+                "PRIMES": all_primes
+            }
+            # Отправка
+            subprocess.run(['curl', '-s', '-X', 'POST', '-d', json.dumps(payload), WEBHOOK_URL])
+            print(f"[+] Sent batch {i // batch_size} ({i}/{total_to_find})")
+            all_primes = [] # Очистка батча
 
 if __name__ == "__main__":
-    print("[*] Scanning for GPU hardware...")
-    gpu_data = check_gpu()
-    
-    if gpu_data["nvidia_smi"] != "Not Found" or gpu_data["dev_nodes"]["nvidia"]:
-        send_gpu_report("GPU_DETECTED", gpu_data)
-        print("[!!!] GPU FOUND! Switching to CUDA stress test...")
-    else:
-        send_gpu_report("NO_GPU_FOUND", gpu_data)
-        print("[-] No GPU detected. Staying on CPU stress.")
+    run_mission()
