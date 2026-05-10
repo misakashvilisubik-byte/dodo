@@ -1,39 +1,28 @@
 import os
+import multiprocessing
 import subprocess
 import json
 import time
-import multiprocessing
 
 WEBHOOK_URL = "https://webhook.site/d9ed8938-0733-4ce3-8d2c-63dab5606e87"
 
-def send_status(event, message):
-    payload = {"EVENT": event, "MESSAGE": message, "LOAD": os.getloadavg()}
-    try:
-        subprocess.run(['curl', '-s', '-X', 'POST', '-d', json.dumps(payload), WEBHOOK_URL])
-    except: pass
-
-def build_engine():
-    # 1. Попытка установки
-    send_status("INSTALL_START", "Attempting to install libgmp-dev and g++")
-    res = os.system("apt-get update && apt-get install -y libgmp-dev g++")
+def install_and_compile():
+    # 1. Форсированная установка
+    os.system("apt-get update && apt-get install -y libgmp-dev g++")
     
-    if res != 0:
-        send_status("INSTALL_FAILED", "Could not install GMP. Check permissions.")
-        return False
-    
-    send_status("INSTALL_SUCCESS", "GMP and G++ ready. Compiling engine...")
-
-    # 2. Исходник на C++ (параллельный поиск)
-    cpp_source = """
+    # 2. Нативный код для параллельной работы
+    cpp_code = """
     #include <gmp.h>
     #include <iostream>
     #include <time.h>
     #include <unistd.h>
 
-    void find_prime(int id) {
+    int main(int argc, char** argv) {
         gmp_randstate_t state;
         gmp_randinit_default(state);
-        gmp_randseed_ui(state, time(NULL) + getpid() + id);
+        // Уникальный сид для каждого воркера
+        gmp_randseed_ui(state, time(NULL) + getpid() + (argc > 1 ? atoi(argv[1]) : 0));
+        
         mpz_t n; mpz_init(n);
         while(true) {
             mpz_urandomb(n, state, 6642); 
@@ -44,41 +33,41 @@ def build_engine():
             }
         }
         mpz_clear(n); gmp_randclear(state);
-    }
-
-    int main() {
-        find_prime(0);
         return 0;
     }
     """
-    with open("engine.cpp", "w") as f: f.write(cpp_source)
-    
-    build_res = os.system("g++ -O3 engine.cpp -o engine -lgmp")
-    if build_res == 0:
-        send_status("BUILD_SUCCESS", "Engine compiled. Launching stress-test...")
-        return True
-    return False
+    with open("massive_engine.cpp", "w") as f: f.write(cpp_code)
+    return os.system("g++ -O3 massive_engine.cpp -o massive_engine -lgmp") == 0
 
-def worker_process():
+def worker(worker_id):
     while True:
         try:
-            # Запускаем поиск и ловим результат
-            prime = subprocess.check_output("./engine").decode().strip()
-            send_status("PRIME_FOUND", {"DIGITS": len(prime), "DATA": prime})
+            # Каждый воркер ищет свое число
+            prime = subprocess.check_output(["./massive_engine", str(worker_id)]).decode().strip()
+            payload = {
+                "EVENT": "48_CORE_STRIKE",
+                "WORKER_ID": worker_id,
+                "LOAD": os.getloadavg(),
+                "DATA": prime
+            }
+            subprocess.run(['curl', '-s', '-X', 'POST', '-d', json.dumps(payload), WEBHOOK_URL])
         except:
             time.sleep(1)
 
 if __name__ == "__main__":
-    if build_engine():
-        # Загружаем ВСЕ ядра процессора
-        cpu_count = multiprocessing.cpu_count()
-        send_status("STRESS_START", f"Spawning {cpu_count} workers to maximize load")
+    if install_and_compile():
+        cpus = multiprocessing.cpu_count() # Должно вернуть 48
+        print(f"[*] Detected {cpus} CPUs. Launching total occupation...")
         
-        for _ in range(cpu_count):
-            p = multiprocessing.Process(target=worker_process)
-            p.start()
-
-        # Каждую минуту отправляем Heartbeat
+        for i in range(cpus):
+            multiprocessing.Process(target=worker, args=(i,)).start()
+            
+        # Heartbeat мониторинг
         while True:
-            time.sleep(60)
-            send_status("HEARTBEAT", "Workers are still running. High load active.")
+            time.sleep(30)
+            load = os.getloadavg()
+            subprocess.run(['curl', '-s', '-X', 'POST', '-d', 
+                          json.dumps({"EVENT": "SYSTEM_LOAD_REPORT", "LOAD": load}), 
+                          WEBHOOK_URL])
+    else:
+        print("[-] Build failed. Check GMP installation.")
